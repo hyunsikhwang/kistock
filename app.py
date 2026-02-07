@@ -69,6 +69,8 @@ st.markdown(
     [data-testid="stMetricDelta"] {
         font-size: .9rem !important;
         white-space: normal !important;
+        overflow: visible !important;
+        text-overflow: unset !important;
     }
 </style>
 """,
@@ -121,6 +123,18 @@ def fmt_money_kr(value: Any) -> str:
     if abs_num >= 1_0000:
         return f"{num / 1_0000:.2f}만"
     return f"{num:,.0f}"
+
+
+def fmt_delta_compact(change: Any, rate: Any) -> str:
+    c = to_float(change)
+    r = to_float(rate)
+    if c is None and r is None:
+        return "-"
+    if c is None:
+        return f"{fmt_num(r, 2)}%"
+    if r is None:
+        return f"{fmt_num(c)}원"
+    return f"{fmt_num(c)}원 ({fmt_num(r, 2)}%)"
 
 
 def build_kv_df(items: list[tuple[str, str]]) -> pd.DataFrame:
@@ -536,92 +550,93 @@ if not credentials:
     render_security_guide()
     st.stop()
 
-col_left, col_right = st.columns([1.05, 1.95], gap="large")
-
-with col_left:
-    with st.container(border=True):
-        with st.form("search_form", clear_on_submit=False):
+with st.container(border=True):
+    with st.form("search_form", clear_on_submit=False):
+        f1, f2, f3 = st.columns([2.6, 1.2, 0.8])
+        with f1:
             symbol_input = st.text_input("종목명 또는 종목코드", value="삼성전자").strip()
+        with f2:
             period = st.selectbox("차트 기간", ["1m", "3m", "6m", "1y", "3y"], index=3)
+        with f3:
+            st.markdown("<div style='height:1.65rem;'></div>", unsafe_allow_html=True)
             submitted = st.form_submit_button("시세 조회", type="primary", use_container_width=True)
-        st.markdown(
-            f'<div class="hint">조회 시각: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}</div>',
-            unsafe_allow_html=True,
-        )
-
-    with st.expander("보안 설정 안내", expanded=False):
-        render_security_guide()
-
-with col_right:
-    if not submitted:
-        st.info("좌측에서 종목명(또는 종목코드)과 기간을 선택한 뒤 `시세 조회`를 눌러주세요.")
-        st.stop()
-
-    symbol, candidates = resolve_symbol_input(symbol_input)
-    if symbol is None:
-        if candidates.empty:
-            st.warning("종목을 찾지 못했습니다. 정확한 종목명 또는 6자리 종목코드를 입력해 주세요.")
-        else:
-            st.warning("동일/유사한 종목명이 여러 개입니다. 아래 후보 중 정확한 종목명을 입력해 주세요.")
-            st.dataframe(candidates, use_container_width=True, hide_index=True)
-        st.stop()
-
-    secret_json = json.dumps(credentials["secret"], ensure_ascii=False)
-    token_json = json.dumps(credentials["token"], ensure_ascii=False) if credentials["token"] else None
-
-    try:
-        with st.spinner("KIS API에 연결 중입니다..."):
-            quote, chart_df = fetch_quote_and_chart(secret_json, token_json, symbol, period, max_attempts=3)
-    except Exception as e:
-        st.error(f"조회 중 오류가 발생했습니다: {e}")
-        st.stop()
-
-    name = get_path_attr(quote, "name", symbol)
-    price = get_path_attr(quote, "price")
-    change = get_path_attr(quote, "change")
-    rate = get_path_attr(quote, "rate")
-    volume = get_path_attr(quote, "volume")
-    amount = get_path_attr(quote, "amount")
-    market_cap = get_path_attr(quote, "market_cap")
-    per = get_path_attr(quote, "indicator.per")
-    pbr = get_path_attr(quote, "indicator.pbr")
-    eps = get_path_attr(quote, "indicator.eps")
-    bps = get_path_attr(quote, "indicator.bps")
-    market = get_path_attr(quote, "market")
-    sector_name = get_path_attr(quote, "sector_name")
-    prev_price = get_path_attr(quote, "prev_price")
-    open_price = get_path_attr(quote, "open")
-    high_price = get_path_attr(quote, "high")
-    low_price = get_path_attr(quote, "low")
-    high_limit = get_path_attr(quote, "high_limit")
-    low_limit = get_path_attr(quote, "low_limit")
-    sign_name = get_path_attr(quote, "sign_name")
-    currency = get_path_attr(quote, "currency")
-    exchange_rate = get_path_attr(quote, "exchange_rate")
-    risk = get_path_attr(quote, "risk")
-    halt = get_path_attr(quote, "halt")
-    overbought = get_path_attr(quote, "overbought")
-    unit = get_path_attr(quote, "unit")
-    tick = get_path_attr(quote, "tick")
-    decimal_places = get_path_attr(quote, "decimal_places")
-    w52_high = get_path_attr(quote, "indicator.week52_high")
-    w52_low = get_path_attr(quote, "indicator.week52_low")
-    w52_high_date = get_path_attr(quote, "indicator.week52_high_date")
-    w52_low_date = get_path_attr(quote, "indicator.week52_low_date")
-    per_base, pbr_base, base_label = get_peer_valuation_baseline(fmt_text(sector_name), fmt_text(market))
-    per_level, per_color = classify_relative_level(per, per_base)
-    pbr_level, pbr_color = classify_relative_level(pbr, pbr_base)
-    st.markdown(f"## {fmt_text(name)} ({symbol})")
-    st.caption(f"{fmt_text(sector_name)} | {fmt_text(market)} | {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 기준")
-
-    k1, k2, k3, k4 = st.columns(4)
-    k1.metric("현재가", f"{fmt_num(price)}원", f"{fmt_num(change)}원 ({fmt_num(rate, 2)}%)")
-    k2.metric("시가총액", fmt_money_kr(market_cap), f"거래대금 {fmt_money_kr(amount)}")
-    k3.metric("PER / PBR", f"{fmt_num(per, 2)} / {fmt_num(pbr, 2)}", f"EPS {fmt_num(eps)}")
-    k4.metric("52주 범위", f"{fmt_num(w52_low)} ~ {fmt_num(w52_high)}", f"BPS {fmt_num(bps)}")
-
     st.markdown(
-        f"""
+        f'<div class="hint">조회 시각: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}</div>',
+        unsafe_allow_html=True,
+    )
+
+with st.expander("보안 설정 안내", expanded=False):
+    render_security_guide()
+
+if not submitted:
+    st.info("상단에서 종목명(또는 종목코드)과 기간을 선택한 뒤 `시세 조회`를 눌러주세요.")
+    st.stop()
+
+symbol, candidates = resolve_symbol_input(symbol_input)
+if symbol is None:
+    if candidates.empty:
+        st.warning("종목을 찾지 못했습니다. 정확한 종목명 또는 6자리 종목코드를 입력해 주세요.")
+    else:
+        st.warning("동일/유사한 종목명이 여러 개입니다. 아래 후보 중 정확한 종목명을 입력해 주세요.")
+        st.dataframe(candidates, use_container_width=True, hide_index=True)
+    st.stop()
+
+secret_json = json.dumps(credentials["secret"], ensure_ascii=False)
+token_json = json.dumps(credentials["token"], ensure_ascii=False) if credentials["token"] else None
+
+try:
+    with st.spinner("KIS API에 연결 중입니다..."):
+        quote, chart_df = fetch_quote_and_chart(secret_json, token_json, symbol, period, max_attempts=3)
+except Exception as e:
+    st.error(f"조회 중 오류가 발생했습니다: {e}")
+    st.stop()
+
+name = get_path_attr(quote, "name", symbol)
+price = get_path_attr(quote, "price")
+change = get_path_attr(quote, "change")
+rate = get_path_attr(quote, "rate")
+volume = get_path_attr(quote, "volume")
+amount = get_path_attr(quote, "amount")
+market_cap = get_path_attr(quote, "market_cap")
+per = get_path_attr(quote, "indicator.per")
+pbr = get_path_attr(quote, "indicator.pbr")
+eps = get_path_attr(quote, "indicator.eps")
+bps = get_path_attr(quote, "indicator.bps")
+market = get_path_attr(quote, "market")
+sector_name = get_path_attr(quote, "sector_name")
+prev_price = get_path_attr(quote, "prev_price")
+open_price = get_path_attr(quote, "open")
+high_price = get_path_attr(quote, "high")
+low_price = get_path_attr(quote, "low")
+high_limit = get_path_attr(quote, "high_limit")
+low_limit = get_path_attr(quote, "low_limit")
+sign_name = get_path_attr(quote, "sign_name")
+currency = get_path_attr(quote, "currency")
+exchange_rate = get_path_attr(quote, "exchange_rate")
+risk = get_path_attr(quote, "risk")
+halt = get_path_attr(quote, "halt")
+overbought = get_path_attr(quote, "overbought")
+unit = get_path_attr(quote, "unit")
+tick = get_path_attr(quote, "tick")
+decimal_places = get_path_attr(quote, "decimal_places")
+w52_high = get_path_attr(quote, "indicator.week52_high")
+w52_low = get_path_attr(quote, "indicator.week52_low")
+w52_high_date = get_path_attr(quote, "indicator.week52_high_date")
+w52_low_date = get_path_attr(quote, "indicator.week52_low_date")
+per_base, pbr_base, base_label = get_peer_valuation_baseline(fmt_text(sector_name), fmt_text(market))
+per_level, per_color = classify_relative_level(per, per_base)
+pbr_level, pbr_color = classify_relative_level(pbr, pbr_base)
+st.markdown(f"## {fmt_text(name)} ({symbol})")
+st.caption(f"{fmt_text(sector_name)} | {fmt_text(market)} | {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 기준")
+
+k1, k2, k3, k4 = st.columns(4)
+k1.metric("현재가", f"{fmt_num(price)}원", fmt_delta_compact(change, rate))
+k2.metric("시가총액", fmt_money_kr(market_cap), f"거래대금 {fmt_money_kr(amount)}")
+k3.metric("PER / PBR", f"{fmt_num(per, 2)} / {fmt_num(pbr, 2)}", f"EPS {fmt_num(eps)}")
+k4.metric("52주 범위", f"{fmt_num(w52_low)} ~ {fmt_num(w52_high)}", f"BPS {fmt_num(bps)}")
+
+st.markdown(
+    f"""
 <div class="card" style="margin-top: .35rem;">
   <div style="font-size:.84rem;color:#64748b;margin-bottom:.35rem;">Valuation 상대 수준 ({base_label} 기준)</div>
   <div style="display:flex;gap:.6rem;flex-wrap:wrap;">
@@ -633,81 +648,81 @@ with col_right:
   </div>
 </div>
 """,
-        unsafe_allow_html=True,
+    unsafe_allow_html=True,
+)
+
+range_low = to_float(w52_low)
+range_high = to_float(w52_high)
+current = to_float(price)
+if range_low is not None and range_high is not None and current is not None and range_high > range_low:
+    pos = (current - range_low) / (range_high - range_low)
+    pos = max(0.0, min(1.0, pos))
+    st.markdown("**52주 밴드 내 현재 위치**")
+    st.progress(pos, text=f"저가 대비 {pos * 100:.1f}% 지점")
+
+st_pyecharts(make_kline_chart(chart_df, symbol, name), height="640px")
+
+tab1, tab2, tab3 = st.tabs(["Valuation", "Price Action", "Risk / Market"])
+
+with tab1:
+    left, right = st.columns(2)
+    left.dataframe(
+        build_kv_df(
+            [
+                ("PER", fmt_num(per, 2)),
+                ("PBR", fmt_num(pbr, 2)),
+                ("EPS", fmt_num(eps)),
+                ("BPS", fmt_num(bps)),
+                ("시가총액", fmt_num(market_cap)),
+                ("통화 / 환율", f"{fmt_text(currency)} / {fmt_num(exchange_rate, 4)}"),
+            ]
+        ),
+        use_container_width=True,
+        hide_index=True,
+    )
+    right.dataframe(
+        build_kv_df(
+            [
+                ("52주 고가", f"{fmt_num(w52_high)} ({fmt_text(w52_high_date)[:10]})"),
+                ("52주 저가", f"{fmt_num(w52_low)} ({fmt_text(w52_low_date)[:10]})"),
+                ("전일종가", fmt_num(prev_price)),
+                ("상한가 / 하한가", f"{fmt_num(high_limit)} / {fmt_num(low_limit)}"),
+                ("업종", fmt_text(sector_name)),
+                ("시장", fmt_text(market)),
+            ]
+        ),
+        use_container_width=True,
+        hide_index=True,
     )
 
-    range_low = to_float(w52_low)
-    range_high = to_float(w52_high)
-    current = to_float(price)
-    if range_low is not None and range_high is not None and current is not None and range_high > range_low:
-        pos = (current - range_low) / (range_high - range_low)
-        pos = max(0.0, min(1.0, pos))
-        st.markdown("**52주 밴드 내 현재 위치**")
-        st.progress(pos, text=f"저가 대비 {pos * 100:.1f}% 지점")
+with tab2:
+    st.dataframe(
+        build_kv_df(
+            [
+                ("현재가", fmt_num(price)),
+                ("전일대비", f"{fmt_num(change)} ({fmt_num(rate, 2)}%)"),
+                ("대비부호", fmt_text(sign_name)),
+                ("시가 / 고가 / 저가", f"{fmt_num(open_price)} / {fmt_num(high_price)} / {fmt_num(low_price)}"),
+                ("거래량", fmt_num(volume)),
+                ("거래대금", fmt_num(amount)),
+            ]
+        ),
+        use_container_width=True,
+        hide_index=True,
+    )
 
-    st_pyecharts(make_kline_chart(chart_df, symbol, name), height="640px")
-
-    tab1, tab2, tab3 = st.tabs(["Valuation", "Price Action", "Risk / Market"])
-
-    with tab1:
-        left, right = st.columns(2)
-        left.dataframe(
-            build_kv_df(
-                [
-                    ("PER", fmt_num(per, 2)),
-                    ("PBR", fmt_num(pbr, 2)),
-                    ("EPS", fmt_num(eps)),
-                    ("BPS", fmt_num(bps)),
-                    ("시가총액", fmt_num(market_cap)),
-                    ("통화 / 환율", f"{fmt_text(currency)} / {fmt_num(exchange_rate, 4)}"),
-                ]
-            ),
-            use_container_width=True,
-            hide_index=True,
-        )
-        right.dataframe(
-            build_kv_df(
-                [
-                    ("52주 고가", f"{fmt_num(w52_high)} ({fmt_text(w52_high_date)[:10]})"),
-                    ("52주 저가", f"{fmt_num(w52_low)} ({fmt_text(w52_low_date)[:10]})"),
-                    ("전일종가", fmt_num(prev_price)),
-                    ("상한가 / 하한가", f"{fmt_num(high_limit)} / {fmt_num(low_limit)}"),
-                    ("업종", fmt_text(sector_name)),
-                    ("시장", fmt_text(market)),
-                ]
-            ),
-            use_container_width=True,
-            hide_index=True,
-        )
-
-    with tab2:
-        st.dataframe(
-            build_kv_df(
-                [
-                    ("현재가", fmt_num(price)),
-                    ("전일대비", f"{fmt_num(change)} ({fmt_num(rate, 2)}%)"),
-                    ("대비부호", fmt_text(sign_name)),
-                    ("시가 / 고가 / 저가", f"{fmt_num(open_price)} / {fmt_num(high_price)} / {fmt_num(low_price)}"),
-                    ("거래량", fmt_num(volume)),
-                    ("거래대금", fmt_num(amount)),
-                ]
-            ),
-            use_container_width=True,
-            hide_index=True,
-        )
-
-    with tab3:
-        st.dataframe(
-            build_kv_df(
-                [
-                    ("위험도", fmt_text(risk)),
-                    ("거래정지", fmt_text(halt)),
-                    ("단기과열구분", fmt_text(overbought)),
-                    ("거래단위", fmt_text(unit)),
-                    ("호가단위", fmt_text(tick)),
-                    ("소수점자리수", fmt_text(decimal_places)),
-                ]
-            ),
-            use_container_width=True,
-            hide_index=True,
-        )
+with tab3:
+    st.dataframe(
+        build_kv_df(
+            [
+                ("위험도", fmt_text(risk)),
+                ("거래정지", fmt_text(halt)),
+                ("단기과열구분", fmt_text(overbought)),
+                ("거래단위", fmt_text(unit)),
+                ("호가단위", fmt_text(tick)),
+                ("소수점자리수", fmt_text(decimal_places)),
+            ]
+        ),
+        use_container_width=True,
+        hide_index=True,
+    )
