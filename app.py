@@ -13,7 +13,7 @@ from pyecharts import options as opts
 from pyecharts.charts import Bar, Grid, Kline
 from streamlit_echarts import st_pyecharts
 
-from pykis.kis import PyKis
+from pykis.kis import KisAccessToken, PyKis
 
 
 st.set_page_config(
@@ -93,44 +93,77 @@ def fmt_num(value: Any, digit: int = 0) -> str:
     return f"{num:,.{digit}f}"
 
 
-def load_kis_profile() -> dict[str, dict[str, str]]:
+def load_kis_profile() -> dict[str, dict[str, Any]]:
     if "kis" not in st.secrets:
         return {}
 
     root = st.secrets["kis"]
-    profiles: dict[str, dict[str, str]] = {}
+    profiles: dict[str, dict[str, Any]] = {}
 
-    required = ("id", "appkey", "secretkey", "account")
-    if all(root.get(k) for k in required):
+    real_id = root.get("id") or root.get("kis_id")
+    real_appkey = root.get("appkey") or root.get("kis_appkey")
+    real_secretkey = root.get("secretkey") or root.get("kis_secretkey")
+    real_account = root.get("account") or root.get("kis_account")
+    real_token = root.get("token") or root.get("kis_token") or root.get("real_token")
+    if all((real_id, real_appkey, real_secretkey, real_account, real_token)):
         profiles["실전"] = {
-            "id": root["id"],
-            "appkey": root["appkey"],
-            "secretkey": root["secretkey"],
-            "account": root["account"],
+            "id": real_id,
+            "appkey": real_appkey,
+            "secretkey": real_secretkey,
+            "account": real_account,
+            "token": real_token,
         }
 
-    v_required = ("virtual_id", "virtual_appkey", "virtual_secretkey", "virtual_account")
-    if all(root.get(k) for k in v_required):
+    virtual_id = root.get("virtual_id") or root.get("kis_virtual_id")
+    virtual_appkey = root.get("virtual_appkey") or root.get("kis_virtual_appkey")
+    virtual_secretkey = root.get("virtual_secretkey") or root.get("kis_virtual_secretkey")
+    virtual_account = root.get("virtual_account") or root.get("kis_virtual_account")
+    virtual_token = root.get("virtual_token") or root.get("kis_virtual_token")
+    if all((virtual_id, virtual_appkey, virtual_secretkey, virtual_account, virtual_token)):
         profiles["모의"] = {
-            "id": root["virtual_id"],
-            "appkey": root["virtual_appkey"],
-            "secretkey": root["virtual_secretkey"],
-            "account": root["virtual_account"],
+            "id": virtual_id,
+            "appkey": virtual_appkey,
+            "secretkey": virtual_secretkey,
+            "account": virtual_account,
+            "token": virtual_token,
         }
     return profiles
+
+
+def parse_token_payload(raw_token: Any) -> dict[str, Any]:
+    if raw_token is None:
+        raise ValueError("토큰 값이 없습니다.")
+    if isinstance(raw_token, str):
+        return json.loads(raw_token)
+    if hasattr(raw_token, "items"):
+        return dict(raw_token.items())
+    if isinstance(raw_token, dict):
+        return raw_token
+    raise ValueError("지원하지 않는 토큰 형식입니다. JSON 문자열 또는 TOML 테이블을 사용해 주세요.")
 
 
 @st.cache_resource(show_spinner=False)
 def get_kis_client(profile_name: str, profile_json: str) -> PyKis:
     payload = json.loads(profile_json)
+    token_payload = parse_token_payload(payload.pop("token", None))
+
     fd, tmp_path = tempfile.mkstemp(prefix=f"kis_{profile_name}_", suffix=".json")
+    tfd, token_path = tempfile.mkstemp(prefix=f"kis_token_{profile_name}_", suffix=".json")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             json.dump(payload, f, ensure_ascii=False)
-        return PyKis(tmp_path)
+        with os.fdopen(tfd, "w", encoding="utf-8") as tf:
+            json.dump(token_payload, tf, ensure_ascii=False)
+        kis = PyKis(tmp_path)
+        kis.token = KisAccessToken.load(token_path)
+        return kis
     finally:
         try:
             os.remove(tmp_path)
+        except OSError:
+            pass
+        try:
+            os.remove(token_path)
         except OSError:
             pass
 
@@ -238,10 +271,12 @@ id = "KIS_LOGIN_ID"
 appkey = "KIS_APP_KEY"
 secretkey = "KIS_SECRET_KEY"
 account = "12345678-01"
+token = '{"token_type":"Bearer","access_token":"...","expires_at":"2026-02-07T23:59:59+09:00"}'
 virtual_id = "KIS_VIRTUAL_ID"
 virtual_appkey = "KIS_VIRTUAL_APP_KEY"
 virtual_secretkey = "KIS_VIRTUAL_SECRET_KEY"
 virtual_account = "87654321-01"
+virtual_token = '{"token_type":"Bearer","access_token":"...","expires_at":"2026-02-07T23:59:59+09:00"}'
 ```
 """
     )

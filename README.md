@@ -20,11 +20,15 @@ id = "KIS_LOGIN_ID"
 appkey = "KIS_APP_KEY"
 secretkey = "KIS_SECRET_KEY"
 account = "12345678-01"
+token = '{"token_type":"Bearer","access_token":"...","expires_at":"2026-02-07T23:59:59+09:00"}'
 virtual_id = "KIS_VIRTUAL_ID"
 virtual_appkey = "KIS_VIRTUAL_APP_KEY"
 virtual_secretkey = "KIS_VIRTUAL_SECRET_KEY"
 virtual_account = "87654321-01"
+virtual_token = '{"token_type":"Bearer","access_token":"...","expires_at":"2026-02-07T23:59:59+09:00"}'
 ```
+
+- `token`, `virtual_token`은 로컬 `token.json` 내용을 JSON 문자열 그대로 넣으면 됩니다.
 
 ## 3) Streamlit Cloud 배포
 
