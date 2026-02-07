@@ -134,12 +134,23 @@ def parse_token_payload(raw_token: Any) -> dict[str, Any]:
     if raw_token is None:
         raise ValueError("토큰 값이 없습니다.")
     if isinstance(raw_token, str):
-        return json.loads(raw_token)
-    if hasattr(raw_token, "items"):
-        return dict(raw_token.items())
-    if isinstance(raw_token, dict):
-        return raw_token
-    raise ValueError("지원하지 않는 토큰 형식입니다. JSON 문자열 또는 TOML 테이블을 사용해 주세요.")
+        token = json.loads(raw_token)
+    elif hasattr(raw_token, "items"):
+        token = dict(raw_token.items())
+    elif isinstance(raw_token, dict):
+        token = raw_token
+    else:
+        raise ValueError("지원하지 않는 토큰 형식입니다. JSON 문자열 또는 TOML 테이블을 사용해 주세요.")
+
+    # python-kis 환경별 토큰 키 이름 차이를 흡수
+    if "access_token_token_expired" in token and "expires_at" not in token:
+        token["expires_at"] = token["access_token_token_expired"]
+    if "expired_at" in token and "expires_at" not in token:
+        token["expires_at"] = token["expired_at"]
+    if "token_type" not in token:
+        token["token_type"] = "Bearer"
+
+    return token
 
 
 @st.cache_resource(show_spinner=False)
@@ -147,11 +158,22 @@ def get_kis_client(profile_name: str, profile_json: str) -> PyKis:
     payload = json.loads(profile_json)
     token_payload = parse_token_payload(payload.pop("token", None))
 
+    secret_payload = {
+        "id": payload.get("id"),
+        "appkey": payload.get("appkey"),
+        "secretkey": payload.get("secretkey"),
+        "account": payload.get("account"),
+        "kis_id": payload.get("id"),
+        "kis_appkey": payload.get("appkey"),
+        "kis_secretkey": payload.get("secretkey"),
+        "kis_account": payload.get("account"),
+    }
+
     fd, tmp_path = tempfile.mkstemp(prefix=f"kis_{profile_name}_", suffix=".json")
     tfd, token_path = tempfile.mkstemp(prefix=f"kis_token_{profile_name}_", suffix=".json")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
-            json.dump(payload, f, ensure_ascii=False)
+            json.dump(secret_payload, f, ensure_ascii=False)
         with os.fdopen(tfd, "w", encoding="utf-8") as tf:
             json.dump(token_payload, tf, ensure_ascii=False)
         kis = PyKis(tmp_path)
