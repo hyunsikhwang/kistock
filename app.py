@@ -443,9 +443,10 @@ col_left, col_right = st.columns([1.05, 1.95], gap="large")
 
 with col_left:
     with st.container(border=True):
-        symbol_input = st.text_input("종목명 또는 종목코드", value="삼성전자").strip()
-        period = st.selectbox("차트 기간", ["1m", "3m", "6m", "1y", "3y"], index=3)
-        submitted = st.button("시세 조회", type="primary", use_container_width=True)
+        with st.form("search_form", clear_on_submit=False):
+            symbol_input = st.text_input("종목명 또는 종목코드", value="삼성전자").strip()
+            period = st.selectbox("차트 기간", ["1m", "3m", "6m", "1y", "3y"], index=3)
+            submitted = st.form_submit_button("시세 조회", type="primary", use_container_width=True)
         st.markdown(
             f'<div class="hint">조회 시각: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}</div>',
             unsafe_allow_html=True,
