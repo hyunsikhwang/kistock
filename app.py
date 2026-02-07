@@ -11,6 +11,7 @@ from typing import Any
 
 import pandas as pd
 import streamlit as st
+from pykrx import stock as krx_stock
 from pyecharts import options as opts
 from pyecharts.charts import Bar, Grid, Kline
 from streamlit_echarts import st_pyecharts
@@ -235,6 +236,47 @@ def fetch_quote_and_chart(
     raise RuntimeError(f"알 수 없는 조회 오류: {last_error}")
 
 
+@st.cache_data(show_spinner=False, ttl=60 * 60 * 6)
+def load_krx_ticker_name_map() -> pd.DataFrame:
+    today = datetime.now().strftime("%Y%m%d")
+    rows: list[dict[str, str]] = []
+    for market in ("KOSPI", "KOSDAQ", "KONEX"):
+        tickers = krx_stock.get_market_ticker_list(date=today, market=market)
+        for ticker in tickers:
+            name = krx_stock.get_market_ticker_name(ticker)
+            if name:
+                rows.append({"ticker": ticker, "name": str(name), "market": market})
+    return pd.DataFrame(rows)
+
+
+def resolve_symbol_input(query: str) -> tuple[str | None, pd.DataFrame]:
+    token = query.strip()
+    if not token:
+        return None, pd.DataFrame()
+
+    try:
+        universe = load_krx_ticker_name_map()
+    except Exception:
+        universe = pd.DataFrame(columns=["ticker", "name", "market"])
+
+    if token.isdigit() and len(token) == 6:
+        return token, universe[universe["ticker"] == token].head(10)
+
+    if universe.empty:
+        return None, pd.DataFrame()
+
+    exact = universe[universe["name"] == token]
+    if len(exact) == 1:
+        return str(exact.iloc[0]["ticker"]), exact
+    if len(exact) > 1:
+        return None, exact.head(20)
+
+    contains = universe[universe["name"].str.contains(token, case=False, na=False)]
+    if len(contains) == 1:
+        return str(contains.iloc[0]["ticker"]), contains
+    return None, contains.head(20)
+
+
 def normalize_chart_df(df: pd.DataFrame) -> pd.DataFrame:
     work = df.copy()
 
@@ -385,26 +427,30 @@ if not credentials:
 col_left, col_right = st.columns([1.05, 1.95], gap="large")
 
 with col_left:
-    st.markdown('<div class="card">', unsafe_allow_html=True)
-    symbol = st.text_input("종목코드(6자리)", value="005930").strip().upper()
-    period = st.selectbox("차트 기간", ["1m", "3m", "6m", "1y", "3y"], index=3)
-    submitted = st.button("시세 조회", type="primary", use_container_width=True)
-    st.markdown(
-        f'<div class="hint">조회 시각: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}</div>',
-        unsafe_allow_html=True,
-    )
-    st.markdown("</div>", unsafe_allow_html=True)
+    with st.container(border=True):
+        symbol_input = st.text_input("종목명 또는 종목코드", value="삼성전자").strip()
+        period = st.selectbox("차트 기간", ["1m", "3m", "6m", "1y", "3y"], index=3)
+        submitted = st.button("시세 조회", type="primary", use_container_width=True)
+        st.markdown(
+            f'<div class="hint">조회 시각: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}</div>',
+            unsafe_allow_html=True,
+        )
 
     with st.expander("보안 설정 안내", expanded=False):
         render_security_guide()
 
 with col_right:
     if not submitted:
-        st.info("좌측에서 종목코드와 기간을 선택한 뒤 `시세 조회`를 눌러주세요.")
+        st.info("좌측에서 종목명(또는 종목코드)과 기간을 선택한 뒤 `시세 조회`를 눌러주세요.")
         st.stop()
 
-    if not symbol or not symbol.isalnum():
-        st.warning("올바른 종목코드를 입력해 주세요. (예: 005930, 000660)")
+    symbol, candidates = resolve_symbol_input(symbol_input)
+    if symbol is None:
+        if candidates.empty:
+            st.warning("종목을 찾지 못했습니다. 정확한 종목명 또는 6자리 종목코드를 입력해 주세요.")
+        else:
+            st.warning("동일/유사한 종목명이 여러 개입니다. 아래 후보 중 정확한 종목명을 입력해 주세요.")
+            st.dataframe(candidates, use_container_width=True, hide_index=True)
         st.stop()
 
     secret_json = json.dumps(credentials["secret"], ensure_ascii=False)

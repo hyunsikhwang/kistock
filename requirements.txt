@@ -3,3 +3,5 @@ python-kis>=2.1.0
 pandas>=2.1.0
 pyecharts>=2.0.0
 streamlit-echarts>=0.4.0
+
+pykrx>=1.0.48
