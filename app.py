@@ -337,7 +337,6 @@ def fetch_quote_and_chart(
     secret_json: str,
     token_json: str | None,
     symbol: str,
-    period: str,
     max_attempts: int = 3,
 ) -> tuple[Any, pd.DataFrame]:
     last_error: Exception | None = None
@@ -350,10 +349,9 @@ def fetch_quote_and_chart(
             stock = kis.stock(symbol)
             quote = stock.quote()
             # period 문자열 해석 차이를 피하기 위해 긴 구간을 받고 날짜 기준으로 직접 필터링
-            chart_df = normalize_chart_df(stock.chart("3y").df())
-            chart_df = filter_chart_by_period(chart_df, period)
-            chart_df = adjust_chart_for_split(chart_df)
-            return quote, chart_df
+            base_chart_df = normalize_chart_df(stock.chart("3y").df())
+            base_chart_df = adjust_chart_for_split(base_chart_df)
+            return quote, base_chart_df
         except Exception as e:
             last_error = e
             if attempt == max_attempts or not is_transient_network_error(e):
@@ -638,12 +636,30 @@ if symbol is None:
 secret_json = json.dumps(credentials["secret"], ensure_ascii=False)
 token_json = json.dumps(credentials["token"], ensure_ascii=False) if credentials["token"] else None
 
+if "quote_cache" not in st.session_state:
+    st.session_state["quote_cache"] = {}
+
+cache = st.session_state["quote_cache"]
+cached = cache.get(symbol)
+cache_hit = False
+
 try:
-    with st.spinner("KIS API에 연결 중입니다..."):
-        quote, chart_df = fetch_quote_and_chart(secret_json, token_json, symbol, period, max_attempts=3)
+    if cached and "quote" in cached and "base_chart_df" in cached:
+        quote = cached["quote"]
+        base_chart_df = cached["base_chart_df"]
+        cache_hit = True
+    else:
+        with st.spinner("KIS API에 연결 중입니다..."):
+            quote, base_chart_df = fetch_quote_and_chart(secret_json, token_json, symbol, max_attempts=3)
+        cache[symbol] = {"quote": quote, "base_chart_df": base_chart_df, "cached_at": datetime.now()}
 except Exception as e:
     st.error(f"조회 중 오류가 발생했습니다: {e}")
     st.stop()
+
+chart_df = filter_chart_by_period(base_chart_df, period)
+
+if cache_hit:
+    st.caption("동일 종목 재조회: API 재호출 없이 캐시된 3년 차트로 기간만 재계산했습니다.")
 
 name = get_path_attr(quote, "name", symbol)
 price = get_path_attr(quote, "price")
