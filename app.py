@@ -105,6 +105,10 @@ def fmt_num(value: Any, digit: int = 0) -> str:
     return f"{num:,.{digit}f}"
 
 
+def fmt_text(value: Any) -> str:
+    return "-" if value is None or value == "" else str(value)
+
+
 def parse_json_or_table(raw: Any, field_name: str) -> dict[str, Any]:
     if raw is None:
         raise ValueError(f"{field_name} 값이 없습니다.")
@@ -322,12 +326,23 @@ def make_kline_chart(df: pd.DataFrame, symbol: str, name: str) -> Grid:
     def build_price_axis_opts() -> opts.AxisOpts:
         # pyecharts 버전별 파라미터 차이(scale vs is_scale) 호환
         try:
-            return opts.AxisOpts(is_scale=True, splitline_opts=opts.SplitLineOpts(is_show=True))
+            return opts.AxisOpts(
+                is_scale=True,
+                splitline_opts=opts.SplitLineOpts(is_show=True),
+                axislabel_opts=opts.LabelOpts(formatter="{value}", margin=12),
+            )
         except TypeError:
             try:
-                return opts.AxisOpts(scale=True, splitline_opts=opts.SplitLineOpts(is_show=True))
+                return opts.AxisOpts(
+                    scale=True,
+                    splitline_opts=opts.SplitLineOpts(is_show=True),
+                    axislabel_opts=opts.LabelOpts(formatter="{value}", margin=12),
+                )
             except TypeError:
-                return opts.AxisOpts(splitline_opts=opts.SplitLineOpts(is_show=True))
+                return opts.AxisOpts(
+                    splitline_opts=opts.SplitLineOpts(is_show=True),
+                    axislabel_opts=opts.LabelOpts(formatter="{value}", margin=12),
+                )
 
     kline = (
         Kline()
@@ -375,8 +390,8 @@ def make_kline_chart(df: pd.DataFrame, symbol: str, name: str) -> Grid:
     )
 
     grid = Grid(init_opts=opts.InitOpts(height="620px"))
-    grid.add(kline, grid_opts=opts.GridOpts(pos_left="7%", pos_right="3%", pos_top="5%", height="65%"))
-    grid.add(bar, grid_opts=opts.GridOpts(pos_left="7%", pos_right="3%", pos_top="74%", height="18%"))
+    grid.add(kline, grid_opts=opts.GridOpts(pos_left="11%", pos_right="4%", pos_top="5%", height="65%"))
+    grid.add(bar, grid_opts=opts.GridOpts(pos_left="11%", pos_right="4%", pos_top="74%", height="18%"))
     return grid
 
 
@@ -474,6 +489,27 @@ with col_right:
     pbr = get_path_attr(quote, "indicator.pbr")
     eps = get_path_attr(quote, "indicator.eps")
     bps = get_path_attr(quote, "indicator.bps")
+    market = get_path_attr(quote, "market")
+    sector_name = get_path_attr(quote, "sector_name")
+    prev_price = get_path_attr(quote, "prev_price")
+    open_price = get_path_attr(quote, "open")
+    high_price = get_path_attr(quote, "high")
+    low_price = get_path_attr(quote, "low")
+    high_limit = get_path_attr(quote, "high_limit")
+    low_limit = get_path_attr(quote, "low_limit")
+    sign_name = get_path_attr(quote, "sign_name")
+    currency = get_path_attr(quote, "currency")
+    exchange_rate = get_path_attr(quote, "exchange_rate")
+    risk = get_path_attr(quote, "risk")
+    halt = get_path_attr(quote, "halt")
+    overbought = get_path_attr(quote, "overbought")
+    unit = get_path_attr(quote, "unit")
+    tick = get_path_attr(quote, "tick")
+    decimal_places = get_path_attr(quote, "decimal_places")
+    w52_high = get_path_attr(quote, "indicator.week52_high")
+    w52_low = get_path_attr(quote, "indicator.week52_low")
+    w52_high_date = get_path_attr(quote, "indicator.week52_high_date")
+    w52_low_date = get_path_attr(quote, "indicator.week52_low_date")
 
     m1, m2 = st.columns(2)
     m1.metric("현재가", f"{fmt_num(price)}원", f"{fmt_num(change)} ({fmt_num(rate, 2)}%)")
@@ -490,3 +526,51 @@ with col_right:
     t2.markdown(f"**PBR**  \n{fmt_num(pbr, 2)}")
     t3.markdown(f"**EPS**  \n{fmt_num(eps, 0)}")
     t4.markdown(f"**BPS**  \n{fmt_num(bps, 0)}")
+
+    t5, t6, t7, t8 = st.columns(4)
+    t5.markdown(f"**전일종가**  \n{fmt_num(prev_price)}원")
+    t6.markdown(f"**시가 / 고가 / 저가**  \n{fmt_num(open_price)} / {fmt_num(high_price)} / {fmt_num(low_price)}")
+    t7.markdown(f"**52주 고가 / 저가**  \n{fmt_num(w52_high)} / {fmt_num(w52_low)}")
+    t8.markdown(f"**업종 / 시장**  \n{fmt_text(sector_name)} / {fmt_text(market)}")
+
+    st.markdown("### 상세 정보")
+    detail_cols = st.columns(3)
+
+    quote_detail = pd.DataFrame(
+        [
+            {"항목": "종목명", "값": fmt_text(name)},
+            {"항목": "종목코드", "값": fmt_text(symbol)},
+            {"항목": "대비", "값": f"{fmt_num(change)} ({fmt_num(rate, 2)}%)"},
+            {"항목": "대비부호", "값": fmt_text(sign_name)},
+            {"항목": "상한가 / 하한가", "값": f"{fmt_num(high_limit)} / {fmt_num(low_limit)}"},
+            {"항목": "거래량", "값": fmt_num(volume)},
+            {"항목": "거래대금", "값": fmt_num(amount)},
+            {"항목": "시가총액", "값": fmt_num(market_cap)},
+        ]
+    )
+    val_detail = pd.DataFrame(
+        [
+            {"항목": "PER", "값": fmt_num(per, 2)},
+            {"항목": "PBR", "값": fmt_num(pbr, 2)},
+            {"항목": "EPS", "값": fmt_num(eps)},
+            {"항목": "BPS", "값": fmt_num(bps)},
+            {"항목": "52주 고가(일자)", "값": f"{fmt_num(w52_high)} ({fmt_text(w52_high_date)[:10]})"},
+            {"항목": "52주 저가(일자)", "값": f"{fmt_num(w52_low)} ({fmt_text(w52_low_date)[:10]})"},
+            {"항목": "통화", "값": fmt_text(currency)},
+            {"항목": "환율", "값": fmt_num(exchange_rate, 4)},
+        ]
+    )
+    risk_detail = pd.DataFrame(
+        [
+            {"항목": "위험도", "값": fmt_text(risk)},
+            {"항목": "거래정지", "값": fmt_text(halt)},
+            {"항목": "단기과열구분", "값": fmt_text(overbought)},
+            {"항목": "거래단위", "값": fmt_text(unit)},
+            {"항목": "호가단위", "값": fmt_text(tick)},
+            {"항목": "소수점자리수", "값": fmt_text(decimal_places)},
+        ]
+    )
+
+    detail_cols[0].dataframe(quote_detail, use_container_width=True, hide_index=True)
+    detail_cols[1].dataframe(val_detail, use_container_width=True, hide_index=True)
+    detail_cols[2].dataframe(risk_detail, use_container_width=True, hide_index=True)
