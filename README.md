@@ -16,19 +16,14 @@ streamlit run app.py
 ```toml
 # .streamlit/secrets.toml (로컬 전용)
 [kis]
+account = "12345678-01"
 id = "KIS_LOGIN_ID"
 appkey = "KIS_APP_KEY"
 secretkey = "KIS_SECRET_KEY"
-account = "12345678-01"
-token = '{"token_type":"Bearer","access_token":"...","expires_at":"2026-02-07T23:59:59+09:00"}'
-virtual_id = "KIS_VIRTUAL_ID"
-virtual_appkey = "KIS_VIRTUAL_APP_KEY"
-virtual_secretkey = "KIS_VIRTUAL_SECRET_KEY"
-virtual_account = "87654321-01"
-virtual_token = '{"token_type":"Bearer","access_token":"...","expires_at":"2026-02-07T23:59:59+09:00"}'
+token = '{"access_token":"...","access_token_token_expired":"2026-02-07 23:59:59","token_type":"Bearer","expires_in":86400}'
 ```
 
-- `token`, `virtual_token`은 로컬 `token.json` 내용을 JSON 문자열 그대로 넣으면 됩니다.
+- `token`은 선택값입니다. 넣으면 기존 `token.json`을 주입하고, 없으면 `keep_token=True`로 자동 발급/저장합니다.
 
 ## 3) Streamlit Cloud 배포
 

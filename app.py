@@ -93,54 +93,53 @@ def fmt_num(value: Any, digit: int = 0) -> str:
     return f"{num:,.{digit}f}"
 
 
-def load_kis_profile() -> dict[str, dict[str, Any]]:
+def parse_json_or_table(raw: Any, field_name: str) -> dict[str, Any]:
+    if raw is None:
+        raise ValueError(f"{field_name} 값이 없습니다.")
+    if isinstance(raw, str):
+        return json.loads(raw)
+    if hasattr(raw, "items"):
+        return dict(raw.items())
+    if isinstance(raw, dict):
+        return raw
+    raise ValueError(f"{field_name} 형식이 올바르지 않습니다.")
+
+
+def normalize_secret_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    normalized = {
+        "id": payload.get("id") or payload.get("kis_id"),
+        "appkey": payload.get("appkey") or payload.get("kis_appkey"),
+        "secretkey": payload.get("secretkey") or payload.get("kis_secretkey"),
+        "account": payload.get("account") or payload.get("kis_account"),
+    }
+    if not all(normalized.values()):
+        raise ValueError("secret 정보(id/appkey/secretkey/account)가 누락되었습니다.")
+    return normalized
+
+
+def load_kis_credentials() -> dict[str, dict[str, Any]]:
     if "kis" not in st.secrets:
         return {}
 
     root = st.secrets["kis"]
-    profiles: dict[str, dict[str, Any]] = {}
 
-    real_id = root.get("id") or root.get("kis_id")
-    real_appkey = root.get("appkey") or root.get("kis_appkey")
-    real_secretkey = root.get("secretkey") or root.get("kis_secretkey")
-    real_account = root.get("account") or root.get("kis_account")
-    real_token = root.get("token") or root.get("kis_token") or root.get("real_token")
-    if all((real_id, real_appkey, real_secretkey, real_account, real_token)):
-        profiles["실전"] = {
-            "id": real_id,
-            "appkey": real_appkey,
-            "secretkey": real_secretkey,
-            "account": real_account,
-            "token": real_token,
+    raw_secret = root.get("secret")
+    if raw_secret is None:
+        raw_secret = {
+            "id": root.get("id") or root.get("kis_id"),
+            "appkey": root.get("appkey") or root.get("kis_appkey"),
+            "secretkey": root.get("secretkey") or root.get("kis_secretkey"),
+            "account": root.get("account") or root.get("kis_account"),
         }
 
-    virtual_id = root.get("virtual_id") or root.get("kis_virtual_id")
-    virtual_appkey = root.get("virtual_appkey") or root.get("kis_virtual_appkey")
-    virtual_secretkey = root.get("virtual_secretkey") or root.get("kis_virtual_secretkey")
-    virtual_account = root.get("virtual_account") or root.get("kis_virtual_account")
-    virtual_token = root.get("virtual_token") or root.get("kis_virtual_token")
-    if all((virtual_id, virtual_appkey, virtual_secretkey, virtual_account, virtual_token)):
-        profiles["모의"] = {
-            "id": virtual_id,
-            "appkey": virtual_appkey,
-            "secretkey": virtual_secretkey,
-            "account": virtual_account,
-            "token": virtual_token,
-        }
-    return profiles
+    secret_payload = normalize_secret_payload(parse_json_or_table(raw_secret, "secret"))
+    raw_token = root.get("token") or root.get("kis_token")
+    token_payload = parse_token_payload(raw_token) if raw_token is not None else None
+    return {"secret": secret_payload, "token": token_payload}
 
 
 def parse_token_payload(raw_token: Any) -> dict[str, Any]:
-    if raw_token is None:
-        raise ValueError("토큰 값이 없습니다.")
-    if isinstance(raw_token, str):
-        token = json.loads(raw_token)
-    elif hasattr(raw_token, "items"):
-        token = dict(raw_token.items())
-    elif isinstance(raw_token, dict):
-        token = raw_token
-    else:
-        raise ValueError("지원하지 않는 토큰 형식입니다. JSON 문자열 또는 TOML 테이블을 사용해 주세요.")
+    token = parse_json_or_table(raw_token, "token")
 
     # python-kis 환경별 토큰 키 이름 차이를 흡수
     if "access_token_token_expired" in token and "expires_at" not in token:
@@ -154,40 +153,30 @@ def parse_token_payload(raw_token: Any) -> dict[str, Any]:
 
 
 @st.cache_resource(show_spinner=False)
-def get_kis_client(profile_name: str, profile_json: str) -> PyKis:
-    payload = json.loads(profile_json)
-    token_payload = parse_token_payload(payload.pop("token", None))
+def get_kis_client(secret_json: str, token_json: str | None) -> PyKis:
+    secret_payload = normalize_secret_payload(json.loads(secret_json))
+    token_payload = parse_token_payload(json.loads(token_json)) if token_json else None
 
-    secret_payload = {
-        "id": payload.get("id"),
-        "appkey": payload.get("appkey"),
-        "secretkey": payload.get("secretkey"),
-        "account": payload.get("account"),
-        "kis_id": payload.get("id"),
-        "kis_appkey": payload.get("appkey"),
-        "kis_secretkey": payload.get("secretkey"),
-        "kis_account": payload.get("account"),
-    }
+    kis = PyKis(
+        id=secret_payload["id"],
+        account=secret_payload["account"],
+        appkey=secret_payload["appkey"],
+        secretkey=secret_payload["secretkey"],
+        keep_token=True,
+    )
 
-    fd, tmp_path = tempfile.mkstemp(prefix=f"kis_{profile_name}_", suffix=".json")
-    tfd, token_path = tempfile.mkstemp(prefix=f"kis_token_{profile_name}_", suffix=".json")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            json.dump(secret_payload, f, ensure_ascii=False)
-        with os.fdopen(tfd, "w", encoding="utf-8") as tf:
-            json.dump(token_payload, tf, ensure_ascii=False)
-        kis = PyKis(tmp_path)
-        kis.token = KisAccessToken.load(token_path)
-        return kis
-    finally:
+    if token_payload:
+        tfd, token_path = tempfile.mkstemp(prefix="kis_token_", suffix=".json")
         try:
-            os.remove(tmp_path)
-        except OSError:
-            pass
-        try:
-            os.remove(token_path)
-        except OSError:
-            pass
+            with os.fdopen(tfd, "w", encoding="utf-8") as tf:
+                json.dump(token_payload, tf, ensure_ascii=False)
+            kis.token = KisAccessToken.load(token_path)
+        finally:
+            try:
+                os.remove(token_path)
+            except OSError:
+                pass
+    return kis
 
 
 def normalize_chart_df(df: pd.DataFrame) -> pd.DataFrame:
@@ -290,15 +279,11 @@ def render_security_guide() -> None:
 # .streamlit/secrets.toml (로컬 전용, 절대 커밋 금지)
 [kis]
 id = "KIS_LOGIN_ID"
+account = "12345678-01"
 appkey = "KIS_APP_KEY"
 secretkey = "KIS_SECRET_KEY"
-account = "12345678-01"
-token = '{"token_type":"Bearer","access_token":"...","expires_at":"2026-02-07T23:59:59+09:00"}'
-virtual_id = "KIS_VIRTUAL_ID"
-virtual_appkey = "KIS_VIRTUAL_APP_KEY"
-virtual_secretkey = "KIS_VIRTUAL_SECRET_KEY"
-virtual_account = "87654321-01"
-virtual_token = '{"token_type":"Bearer","access_token":"...","expires_at":"2026-02-07T23:59:59+09:00"}'
+# 선택: 기존 token.json 내용을 JSON 문자열로 그대로 넣으면 주입합니다.
+token = '{"access_token":"...","access_token_token_expired":"2026-02-07 23:59:59","token_type":"Bearer","expires_in":86400}'
 ```
 """
     )
@@ -324,9 +309,9 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-profiles = load_kis_profile()
+credentials = load_kis_credentials()
 
-if not profiles:
+if not credentials:
     st.error("`st.secrets['kis']` 설정이 없습니다. 아래 보안 설정 예시를 참고해 주세요.")
     render_security_guide()
     st.stop()
@@ -335,7 +320,6 @@ col_left, col_right = st.columns([1.05, 1.95], gap="large")
 
 with col_left:
     st.markdown('<div class="card">', unsafe_allow_html=True)
-    mode = st.selectbox("계정 모드", list(profiles.keys()), index=0)
     symbol = st.text_input("종목코드(6자리)", value="005930").strip().upper()
     period = st.selectbox("차트 기간", ["1m", "3m", "6m", "1y", "3y"], index=3)
     submitted = st.button("시세 조회", type="primary", use_container_width=True)
@@ -357,11 +341,12 @@ with col_right:
         st.warning("올바른 종목코드를 입력해 주세요. (예: 005930, 000660)")
         st.stop()
 
-    profile_json = json.dumps(profiles[mode], ensure_ascii=False)
+    secret_json = json.dumps(credentials["secret"], ensure_ascii=False)
+    token_json = json.dumps(credentials["token"], ensure_ascii=False) if credentials["token"] else None
 
     try:
         with st.spinner("KIS API에 연결 중입니다..."):
-            kis = get_kis_client(mode, profile_json)
+            kis = get_kis_client(secret_json, token_json)
             stock = kis.stock(symbol)
             quote = stock.quote()
             chart_df = normalize_chart_df(stock.chart(period).df())
