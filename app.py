@@ -3,8 +3,10 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+import time
 from datetime import datetime
 from decimal import Decimal
+from http.client import RemoteDisconnected
 from typing import Any
 
 import pandas as pd
@@ -57,6 +59,15 @@ st.markdown(
     .hint {
         color: #64748b;
         font-size: .86rem;
+    }
+    [data-testid="stMetricValue"] {
+        font-size: 1.25rem !important;
+        line-height: 1.2 !important;
+        white-space: normal !important;
+    }
+    [data-testid="stMetricDelta"] {
+        font-size: .9rem !important;
+        white-space: normal !important;
     }
 </style>
 """,
@@ -152,6 +163,24 @@ def parse_token_payload(raw_token: Any) -> dict[str, Any]:
     return token
 
 
+def is_transient_network_error(exc: Exception) -> bool:
+    if isinstance(exc, (RemoteDisconnected, TimeoutError, ConnectionError, OSError)):
+        return True
+    text = repr(exc).lower()
+    transient_signals = (
+        "connection aborted",
+        "remote end closed connection without response",
+        "remotedisconnected",
+        "read timed out",
+        "connection reset by peer",
+        "temporarily unavailable",
+        "bad gateway",
+        "service unavailable",
+        "gateway timeout",
+    )
+    return any(signal in text for signal in transient_signals)
+
+
 @st.cache_resource(show_spinner=False)
 def get_kis_client(secret_json: str, token_json: str | None) -> PyKis:
     secret_payload = normalize_secret_payload(json.loads(secret_json))
@@ -177,6 +206,33 @@ def get_kis_client(secret_json: str, token_json: str | None) -> PyKis:
             except OSError:
                 pass
     return kis
+
+
+def fetch_quote_and_chart(
+    secret_json: str,
+    token_json: str | None,
+    symbol: str,
+    period: str,
+    max_attempts: int = 3,
+) -> tuple[Any, pd.DataFrame]:
+    last_error: Exception | None = None
+
+    for attempt in range(1, max_attempts + 1):
+        try:
+            if attempt > 1:
+                get_kis_client.clear()
+            kis = get_kis_client(secret_json, token_json)
+            stock = kis.stock(symbol)
+            quote = stock.quote()
+            chart_df = normalize_chart_df(stock.chart(period).df())
+            return quote, chart_df
+        except Exception as e:
+            last_error = e
+            if attempt == max_attempts or not is_transient_network_error(e):
+                raise
+            time.sleep(0.8 * attempt)
+
+    raise RuntimeError(f"알 수 없는 조회 오류: {last_error}")
 
 
 def normalize_chart_df(df: pd.DataFrame) -> pd.DataFrame:
@@ -221,6 +277,16 @@ def make_kline_chart(df: pd.DataFrame, symbol: str, name: str) -> Grid:
     k_data = df[["open", "close", "low", "high"]].round(2).values.tolist()
     volume_data = df["volume"].fillna(0).astype(float).tolist()
 
+    def build_price_axis_opts() -> opts.AxisOpts:
+        # pyecharts 버전별 파라미터 차이(scale vs is_scale) 호환
+        try:
+            return opts.AxisOpts(is_scale=True, splitline_opts=opts.SplitLineOpts(is_show=True))
+        except TypeError:
+            try:
+                return opts.AxisOpts(scale=True, splitline_opts=opts.SplitLineOpts(is_show=True))
+            except TypeError:
+                return opts.AxisOpts(splitline_opts=opts.SplitLineOpts(is_show=True))
+
     kline = (
         Kline()
         .add_xaxis(x_data)
@@ -236,10 +302,10 @@ def make_kline_chart(df: pd.DataFrame, symbol: str, name: str) -> Grid:
         )
         .set_global_opts(
             xaxis_opts=opts.AxisOpts(type_="category"),
-            yaxis_opts=opts.AxisOpts(scale=True, splitline_opts=opts.SplitLineOpts(is_show=True)),
+            yaxis_opts=build_price_axis_opts(),
             legend_opts=opts.LegendOpts(is_show=False),
             datazoom_opts=[
-                opts.DataZoomOpts(type_="inside", range_start=60, range_end=100),
+                opts.DataZoomOpts(type_="inside", range_start=0, range_end=100),
                 opts.DataZoomOpts(type_="slider", pos_bottom="2%"),
             ],
             tooltip_opts=opts.TooltipOpts(trigger="axis", axis_pointer_type="cross"),
@@ -346,10 +412,7 @@ with col_right:
 
     try:
         with st.spinner("KIS API에 연결 중입니다..."):
-            kis = get_kis_client(secret_json, token_json)
-            stock = kis.stock(symbol)
-            quote = stock.quote()
-            chart_df = normalize_chart_df(stock.chart(period).df())
+            quote, chart_df = fetch_quote_and_chart(secret_json, token_json, symbol, period, max_attempts=3)
     except Exception as e:
         st.error(f"조회 중 오류가 발생했습니다: {e}")
         st.stop()
@@ -366,9 +429,10 @@ with col_right:
     eps = get_path_attr(quote, "indicator.eps")
     bps = get_path_attr(quote, "indicator.bps")
 
-    m1, m2, m3, m4 = st.columns(4)
+    m1, m2 = st.columns(2)
     m1.metric("현재가", f"{fmt_num(price)}원", f"{fmt_num(change)} ({fmt_num(rate, 2)}%)")
     m2.metric("거래량", fmt_num(volume))
+    m3, m4 = st.columns(2)
     m3.metric("거래대금", fmt_num(amount))
     m4.metric("시가총액", fmt_num(market_cap))
 
