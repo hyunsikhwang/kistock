@@ -109,6 +109,103 @@ def fmt_text(value: Any) -> str:
     return "-" if value is None or value == "" else str(value)
 
 
+def fmt_money_kr(value: Any) -> str:
+    num = to_float(value)
+    if num is None:
+        return "-"
+    abs_num = abs(num)
+    if abs_num >= 1_0000_0000_0000:
+        return f"{num / 1_0000_0000_0000:.2f}조"
+    if abs_num >= 1_0000_0000:
+        return f"{num / 1_0000_0000:.2f}억"
+    if abs_num >= 1_0000:
+        return f"{num / 1_0000:.2f}만"
+    return f"{num:,.0f}"
+
+
+def build_kv_df(items: list[tuple[str, str]]) -> pd.DataFrame:
+    return pd.DataFrame([{"항목": k, "값": v} for k, v in items])
+
+
+def classify_relative_level(value: Any, baseline: Any) -> tuple[str, str]:
+    v = to_float(value)
+    b = to_float(baseline)
+    if v is None or b is None or b <= 0:
+        return "N/A", "#64748b"
+    ratio = v / b
+    if ratio <= 0.8:
+        return "저", "#2563eb"
+    if ratio <= 1.2:
+        return "중", "#16a34a"
+    return "고", "#ef4444"
+
+
+@st.cache_data(show_spinner=False, ttl=60 * 60 * 6)
+def load_market_fundamental(date: str, market: str) -> pd.DataFrame:
+    df = krx_stock.get_market_fundamental_by_ticker(date=date, market=market)
+    if df is None or df.empty:
+        return pd.DataFrame(columns=["ticker", "PER", "PBR"])
+    out = df.reset_index().rename(columns={"티커": "ticker"})
+    if "PER" not in out.columns:
+        out["PER"] = None
+    if "PBR" not in out.columns:
+        out["PBR"] = None
+    return out[["ticker", "PER", "PBR"]]
+
+
+@st.cache_data(show_spinner=False, ttl=60 * 60 * 6)
+def resolve_sector_peer_tickers(sector_name: str, market: str) -> list[str]:
+    if not sector_name:
+        return []
+
+    market_token = "KOSPI" if "KOSPI" in market.upper() else "KOSDAQ"
+    try:
+        index_tickers = krx_stock.get_index_ticker_list(market=market_token)
+    except Exception:
+        return []
+
+    normalized = sector_name.replace(" ", "")
+    target_index = None
+    for idx in index_tickers:
+        idx_name = str(krx_stock.get_index_ticker_name(idx)).replace(" ", "")
+        if normalized and normalized in idx_name:
+            target_index = idx
+            break
+
+    if target_index is None:
+        return []
+
+    try:
+        peers = krx_stock.get_index_portfolio_deposit_file(target_index)
+        return [str(x) for x in peers]
+    except Exception:
+        return []
+
+
+def get_peer_valuation_baseline(sector_name: str, market: str) -> tuple[float | None, float | None, str]:
+    market_token = "KOSPI" if "KOSPI" in market.upper() else "KOSDAQ"
+    today = datetime.now().strftime("%Y%m%d")
+    funda = load_market_fundamental(today, market_token)
+    if funda.empty:
+        return None, None, "기준 없음"
+
+    peers = resolve_sector_peer_tickers(sector_name, market_token)
+    if peers:
+        peer_df = funda[funda["ticker"].isin(peers)].copy()
+        if not peer_df.empty:
+            peer_df["PER"] = pd.to_numeric(peer_df["PER"], errors="coerce")
+            peer_df["PBR"] = pd.to_numeric(peer_df["PBR"], errors="coerce")
+            per_avg = peer_df.loc[peer_df["PER"] > 0, "PER"].mean()
+            pbr_avg = peer_df.loc[peer_df["PBR"] > 0, "PBR"].mean()
+            return to_float(per_avg), to_float(pbr_avg), "업종 평균"
+
+    funda["PER"] = pd.to_numeric(funda["PER"], errors="coerce")
+    funda["PBR"] = pd.to_numeric(funda["PBR"], errors="coerce")
+    per_avg = funda.loc[funda["PER"] > 0, "PER"].mean()
+    pbr_avg = funda.loc[funda["PBR"] > 0, "PBR"].mean()
+    return to_float(per_avg), to_float(pbr_avg), f"{market_token} 평균"
+
+
 def parse_json_or_table(raw: Any, field_name: str) -> dict[str, Any]:
     if raw is None:
         raise ValueError(f"{field_name} 값이 없습니다.")
@@ -511,67 +608,106 @@ with col_right:
     w52_low = get_path_attr(quote, "indicator.week52_low")
     w52_high_date = get_path_attr(quote, "indicator.week52_high_date")
     w52_low_date = get_path_attr(quote, "indicator.week52_low_date")
+    per_base, pbr_base, base_label = get_peer_valuation_baseline(fmt_text(sector_name), fmt_text(market))
+    per_level, per_color = classify_relative_level(per, per_base)
+    pbr_level, pbr_color = classify_relative_level(pbr, pbr_base)
+    st.markdown(f"## {fmt_text(name)} ({symbol})")
+    st.caption(f"{fmt_text(sector_name)} | {fmt_text(market)} | {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 기준")
 
-    m1, m2 = st.columns(2)
-    m1.metric("현재가", f"{fmt_num(price)}원", f"{fmt_num(change)} ({fmt_num(rate, 2)}%)")
-    m2.metric("거래량", fmt_num(volume))
-    m3, m4 = st.columns(2)
-    m3.metric("거래대금", fmt_num(amount))
-    m4.metric("시가총액", fmt_num(market_cap))
+    k1, k2, k3, k4 = st.columns(4)
+    k1.metric("현재가", f"{fmt_num(price)}원", f"{fmt_num(change)}원 ({fmt_num(rate, 2)}%)")
+    k2.metric("시가총액", fmt_money_kr(market_cap), f"거래대금 {fmt_money_kr(amount)}")
+    k3.metric("PER / PBR", f"{fmt_num(per, 2)} / {fmt_num(pbr, 2)}", f"EPS {fmt_num(eps)}")
+    k4.metric("52주 범위", f"{fmt_num(w52_low)} ~ {fmt_num(w52_high)}", f"BPS {fmt_num(bps)}")
+
+    st.markdown(
+        f"""
+<div class="card" style="margin-top: .35rem;">
+  <div style="font-size:.84rem;color:#64748b;margin-bottom:.35rem;">Valuation 상대 수준 ({base_label} 기준)</div>
+  <div style="display:flex;gap:.6rem;flex-wrap:wrap;">
+    <span style="padding:.2rem .55rem;border-radius:999px;background:{per_color};color:#fff;font-size:.82rem;">PER: {per_level}</span>
+    <span style="padding:.2rem .55rem;border-radius:999px;background:{pbr_color};color:#fff;font-size:.82rem;">PBR: {pbr_level}</span>
+    <span style="padding:.2rem .55rem;border-radius:999px;background:#e2e8f0;color:#0f172a;font-size:.82rem;">
+      평균 PER/PBR {fmt_num(per_base,2)} / {fmt_num(pbr_base,2)}
+    </span>
+  </div>
+</div>
+""",
+        unsafe_allow_html=True,
+    )
+
+    range_low = to_float(w52_low)
+    range_high = to_float(w52_high)
+    current = to_float(price)
+    if range_low is not None and range_high is not None and current is not None and range_high > range_low:
+        pos = (current - range_low) / (range_high - range_low)
+        pos = max(0.0, min(1.0, pos))
+        st.markdown("**52주 밴드 내 현재 위치**")
+        st.progress(pos, text=f"저가 대비 {pos * 100:.1f}% 지점")
 
     st_pyecharts(make_kline_chart(chart_df, symbol, name), height="640px")
 
-    st.markdown("### 종목 지표")
-    t1, t2, t3, t4 = st.columns(4)
-    t1.markdown(f"**PER**  \n{fmt_num(per, 2)}")
-    t2.markdown(f"**PBR**  \n{fmt_num(pbr, 2)}")
-    t3.markdown(f"**EPS**  \n{fmt_num(eps, 0)}")
-    t4.markdown(f"**BPS**  \n{fmt_num(bps, 0)}")
+    tab1, tab2, tab3 = st.tabs(["Valuation", "Price Action", "Risk / Market"])
 
-    t5, t6, t7, t8 = st.columns(4)
-    t5.markdown(f"**전일종가**  \n{fmt_num(prev_price)}원")
-    t6.markdown(f"**시가 / 고가 / 저가**  \n{fmt_num(open_price)} / {fmt_num(high_price)} / {fmt_num(low_price)}")
-    t7.markdown(f"**52주 고가 / 저가**  \n{fmt_num(w52_high)} / {fmt_num(w52_low)}")
-    t8.markdown(f"**업종 / 시장**  \n{fmt_text(sector_name)} / {fmt_text(market)}")
+    with tab1:
+        left, right = st.columns(2)
+        left.dataframe(
+            build_kv_df(
+                [
+                    ("PER", fmt_num(per, 2)),
+                    ("PBR", fmt_num(pbr, 2)),
+                    ("EPS", fmt_num(eps)),
+                    ("BPS", fmt_num(bps)),
+                    ("시가총액", fmt_num(market_cap)),
+                    ("통화 / 환율", f"{fmt_text(currency)} / {fmt_num(exchange_rate, 4)}"),
+                ]
+            ),
+            use_container_width=True,
+            hide_index=True,
+        )
+        right.dataframe(
+            build_kv_df(
+                [
+                    ("52주 고가", f"{fmt_num(w52_high)} ({fmt_text(w52_high_date)[:10]})"),
+                    ("52주 저가", f"{fmt_num(w52_low)} ({fmt_text(w52_low_date)[:10]})"),
+                    ("전일종가", fmt_num(prev_price)),
+                    ("상한가 / 하한가", f"{fmt_num(high_limit)} / {fmt_num(low_limit)}"),
+                    ("업종", fmt_text(sector_name)),
+                    ("시장", fmt_text(market)),
+                ]
+            ),
+            use_container_width=True,
+            hide_index=True,
+        )
 
-    st.markdown("### 상세 정보")
-    detail_cols = st.columns(3)
+    with tab2:
+        st.dataframe(
+            build_kv_df(
+                [
+                    ("현재가", fmt_num(price)),
+                    ("전일대비", f"{fmt_num(change)} ({fmt_num(rate, 2)}%)"),
+                    ("대비부호", fmt_text(sign_name)),
+                    ("시가 / 고가 / 저가", f"{fmt_num(open_price)} / {fmt_num(high_price)} / {fmt_num(low_price)}"),
+                    ("거래량", fmt_num(volume)),
+                    ("거래대금", fmt_num(amount)),
+                ]
+            ),
+            use_container_width=True,
+            hide_index=True,
+        )
 
-    quote_detail = pd.DataFrame(
-        [
-            {"항목": "종목명", "값": fmt_text(name)},
-            {"항목": "종목코드", "값": fmt_text(symbol)},
-            {"항목": "대비", "값": f"{fmt_num(change)} ({fmt_num(rate, 2)}%)"},
-            {"항목": "대비부호", "값": fmt_text(sign_name)},
-            {"항목": "상한가 / 하한가", "값": f"{fmt_num(high_limit)} / {fmt_num(low_limit)}"},
-            {"항목": "거래량", "값": fmt_num(volume)},
-            {"항목": "거래대금", "값": fmt_num(amount)},
-            {"항목": "시가총액", "값": fmt_num(market_cap)},
-        ]
-    )
-    val_detail = pd.DataFrame(
-        [
-            {"항목": "PER", "값": fmt_num(per, 2)},
-            {"항목": "PBR", "값": fmt_num(pbr, 2)},
-            {"항목": "EPS", "값": fmt_num(eps)},
-            {"항목": "BPS", "값": fmt_num(bps)},
-            {"항목": "52주 고가(일자)", "값": f"{fmt_num(w52_high)} ({fmt_text(w52_high_date)[:10]})"},
-            {"항목": "52주 저가(일자)", "값": f"{fmt_num(w52_low)} ({fmt_text(w52_low_date)[:10]})"},
-            {"항목": "통화", "값": fmt_text(currency)},
-            {"항목": "환율", "값": fmt_num(exchange_rate, 4)},
-        ]
-    )
-    risk_detail = pd.DataFrame(
-        [
-            {"항목": "위험도", "값": fmt_text(risk)},
-            {"항목": "거래정지", "값": fmt_text(halt)},
-            {"항목": "단기과열구분", "값": fmt_text(overbought)},
-            {"항목": "거래단위", "값": fmt_text(unit)},
-            {"항목": "호가단위", "값": fmt_text(tick)},
-            {"항목": "소수점자리수", "값": fmt_text(decimal_places)},
-        ]
-    )
-
-    detail_cols[0].dataframe(quote_detail, use_container_width=True, hide_index=True)
-    detail_cols[1].dataframe(val_detail, use_container_width=True, hide_index=True)
-    detail_cols[2].dataframe(risk_detail, use_container_width=True, hide_index=True)
+    with tab3:
+        st.dataframe(
+            build_kv_df(
+                [
+                    ("위험도", fmt_text(risk)),
+                    ("거래정지", fmt_text(halt)),
+                    ("단기과열구분", fmt_text(overbought)),
+                    ("거래단위", fmt_text(unit)),
+                    ("호가단위", fmt_text(tick)),
+                    ("소수점자리수", fmt_text(decimal_places)),
+                ]
+            ),
+            use_container_width=True,
+            hide_index=True,
+        )
