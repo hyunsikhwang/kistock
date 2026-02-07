@@ -18,6 +18,15 @@ from streamlit_echarts import st_pyecharts
 
 from pykis.kis import KisAccessToken, PyKis
 
+PERIOD_LABELS = {
+    "1m": "1개월",
+    "3m": "3개월",
+    "6m": "6개월",
+    "1y": "1년",
+    "3y": "3년",
+}
+PERIOD_TO_DAYS = {"1m": 30, "3m": 90, "6m": 180, "1y": 365, "3y": 365 * 3}
+
 
 st.set_page_config(
     page_title="KIS Real-time K-Stock",
@@ -340,7 +349,10 @@ def fetch_quote_and_chart(
             kis = get_kis_client(secret_json, token_json)
             stock = kis.stock(symbol)
             quote = stock.quote()
-            chart_df = normalize_chart_df(stock.chart(period).df())
+            # period 문자열 해석 차이를 피하기 위해 긴 구간을 받고 날짜 기준으로 직접 필터링
+            chart_df = normalize_chart_df(stock.chart("3y").df())
+            chart_df = filter_chart_by_period(chart_df, period)
+            chart_df = adjust_chart_for_split(chart_df)
             return quote, chart_df
         except Exception as e:
             last_error = e
@@ -349,6 +361,43 @@ def fetch_quote_and_chart(
             time.sleep(0.8 * attempt)
 
     raise RuntimeError(f"알 수 없는 조회 오류: {last_error}")
+
+
+def filter_chart_by_period(df: pd.DataFrame, period: str) -> pd.DataFrame:
+    if df.empty:
+        return df
+    days = PERIOD_TO_DAYS.get(period, 365)
+    work = df.copy()
+    work["date"] = pd.to_datetime(work["date"])
+    end_date = work["date"].max()
+    start_date = end_date - pd.Timedelta(days=days)
+    work = work[work["date"] >= start_date].copy()
+    work["date"] = work["date"].dt.strftime("%Y-%m-%d")
+    return work.reset_index(drop=True)
+
+
+def adjust_chart_for_split(df: pd.DataFrame, threshold: float = 1.7) -> pd.DataFrame:
+    if df.empty or len(df) < 3:
+        return df
+
+    work = df.copy().reset_index(drop=True)
+    close = work["close"].astype(float).values
+    factors = [1.0] * len(work)
+
+    for i in range(1, len(work)):
+        prev = close[i - 1]
+        cur = close[i]
+        if prev <= 0 or cur <= 0:
+            continue
+        ratio = cur / prev
+        if ratio >= threshold or ratio <= (1.0 / threshold):
+            for j in range(i):
+                factors[j] *= ratio
+
+    factor_s = pd.Series(factors)
+    for col in ("open", "high", "low", "close"):
+        work[col] = pd.to_numeric(work[col], errors="coerce") * factor_s
+    return work
 
 
 @st.cache_data(show_spinner=False, ttl=60 * 60 * 6)
@@ -556,7 +605,12 @@ with st.container(border=True):
         with f1:
             symbol_input = st.text_input("종목명 또는 종목코드", value="삼성전자").strip()
         with f2:
-            period = st.selectbox("차트 기간", ["1m", "3m", "6m", "1y", "3y"], index=3)
+            period = st.selectbox(
+                "차트 기간",
+                list(PERIOD_LABELS.keys()),
+                index=3,
+                format_func=lambda x: PERIOD_LABELS.get(x, x),
+            )
         with f3:
             st.markdown("<div style='height:1.65rem;'></div>", unsafe_allow_html=True)
             submitted = st.form_submit_button("시세 조회", type="primary", use_container_width=True)
@@ -654,11 +708,19 @@ st.markdown(
 range_low = to_float(w52_low)
 range_high = to_float(w52_high)
 current = to_float(price)
-if range_low is not None and range_high is not None and current is not None and range_high > range_low:
+period_low = to_float(chart_df["low"].min()) if not chart_df.empty else None
+period_high = to_float(chart_df["high"].max()) if not chart_df.empty else None
+
+if period_low is not None and period_high is not None and current is not None and period_high > period_low:
+    pos = (current - period_low) / (period_high - period_low)
+    pos = max(0.0, min(1.0, pos))
+    st.markdown(f"**선택 기간({PERIOD_LABELS.get(period, period)}) 밴드 내 현재 위치 (분할 보정)**")
+    st.progress(pos, text=f"기간 저가 대비 {pos * 100:.1f}% 지점")
+elif range_low is not None and range_high is not None and current is not None and range_high > range_low:
     pos = (current - range_low) / (range_high - range_low)
     pos = max(0.0, min(1.0, pos))
     st.markdown("**52주 밴드 내 현재 위치**")
-    st.progress(pos, text=f"저가 대비 {pos * 100:.1f}% 지점")
+    st.progress(pos, text=f"52주 저가 대비 {pos * 100:.1f}% 지점")
 
 st_pyecharts(make_kline_chart(chart_df, symbol, name), height="640px")
 
