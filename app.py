@@ -490,6 +490,49 @@ def load_krx_ticker_name_map() -> pd.DataFrame:
     return df.reindex(columns=required_cols)
 
 
+@st.cache_data(show_spinner=False, ttl=60 * 60 * 12)
+def find_ticker_by_exact_name_fallback(name_query: str) -> pd.DataFrame:
+    required_cols = ["ticker", "name", "market"]
+    token = str(name_query).strip()
+    if not token:
+        return pd.DataFrame(columns=required_cols)
+
+    token_key = "".join(token.split()).lower()
+    rows: list[dict[str, str]] = []
+
+    # 즉시 대응용 고정 alias (외부 데이터 조회가 불안정할 때 최소 보장)
+    static_alias = {"삼성전자": "005930"}
+    if token in static_alias:
+        rows.append({"ticker": static_alias[token], "name": token, "market": "KOSPI"})
+        return pd.DataFrame(rows).reindex(columns=required_cols)
+
+    markets = ("KOSPI", "KOSDAQ", "KONEX")
+    for offset in range(0, 7):
+        target = (datetime.now() - timedelta(days=offset)).strftime("%Y%m%d")
+        rows.clear()
+        for market in markets:
+            try:
+                tickers = krx_stock.get_market_ticker_list(date=target, market=market)
+            except Exception:
+                continue
+
+            for ticker in tickers:
+                try:
+                    nm = krx_stock.get_market_ticker_name(ticker)
+                except Exception:
+                    continue
+                if not nm:
+                    continue
+                nm_s = str(nm)
+                nm_key = "".join(nm_s.split()).lower()
+                if nm_s == token or nm_key == token_key:
+                    rows.append({"ticker": str(ticker), "name": nm_s, "market": market})
+        if rows:
+            return pd.DataFrame(rows).drop_duplicates(subset=["ticker"]).reindex(columns=required_cols)
+
+    return pd.DataFrame(columns=required_cols)
+
+
 def resolve_symbol_input(query: str) -> tuple[str | None, pd.DataFrame, str]:
     token = query.strip()
     if not token:
@@ -509,6 +552,11 @@ def resolve_symbol_input(query: str) -> tuple[str | None, pd.DataFrame, str]:
         return token, universe[universe["ticker"].astype(str) == token].head(10), "resolved"
 
     if universe.empty:
+        fallback = find_ticker_by_exact_name_fallback(token)
+        if len(fallback) == 1:
+            return str(fallback.iloc[0]["ticker"]), fallback, "resolved"
+        if len(fallback) > 1:
+            return None, fallback.head(20), "ambiguous"
         return None, pd.DataFrame(), ("universe_unavailable" if not universe_loaded else "not_found")
 
     token_key = "".join(token.split()).lower()
@@ -535,6 +583,11 @@ def resolve_symbol_input(query: str) -> tuple[str | None, pd.DataFrame, str]:
         return str(contains.iloc[0]["ticker"]), contains[required_cols], "resolved"
     if len(contains) > 1:
         return None, contains[required_cols].head(20), "ambiguous"
+    fallback = find_ticker_by_exact_name_fallback(token)
+    if len(fallback) == 1:
+        return str(fallback.iloc[0]["ticker"]), fallback, "resolved"
+    if len(fallback) > 1:
+        return None, fallback.head(20), "ambiguous"
     return None, pd.DataFrame(columns=required_cols), "not_found"
 
 
