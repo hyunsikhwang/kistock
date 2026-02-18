@@ -306,6 +306,20 @@ def is_transient_network_error(exc: Exception) -> bool:
     return any(signal in text for signal in transient_signals)
 
 
+def is_token_issue_rate_limited(exc: Exception) -> bool:
+    text = repr(exc)
+    signals = (
+        "EGW00133",
+        "접근토큰 발급 잠시 후 다시 시도하세요",
+        "/oauth2/tokenP",
+        "403",
+        "Forbidden",
+    )
+    return all(signal in text for signal in ("EGW00133", "/oauth2/tokenP")) or (
+        "EGW00133" in text and "Forbidden" in text
+    ) or all(signal in text for signal in signals[:2])
+
+
 @st.cache_resource(show_spinner=False)
 def get_kis_client(secret_json: str, token_json: str | None) -> PyKis:
     secret_payload = normalize_secret_payload(json.loads(secret_json))
@@ -340,6 +354,7 @@ def fetch_quote_and_chart(
     max_attempts: int = 3,
 ) -> tuple[Any, pd.DataFrame]:
     last_error: Exception | None = None
+    token_rate_limit_wait_sec = 61
 
     for attempt in range(1, max_attempts + 1):
         try:
@@ -354,6 +369,13 @@ def fetch_quote_and_chart(
             return quote, base_chart_df
         except Exception as e:
             last_error = e
+            if is_token_issue_rate_limited(e):
+                if attempt == max_attempts:
+                    raise RuntimeError(
+                        "접근토큰 발급 제한(1분 1회)에 걸렸습니다. 1분 후 다시 시도해 주세요."
+                    ) from e
+                time.sleep(token_rate_limit_wait_sec)
+                continue
             if attempt == max_attempts or not is_transient_network_error(e):
                 raise
             time.sleep(0.8 * attempt)
