@@ -8,6 +8,8 @@ from datetime import datetime, timedelta
 from decimal import Decimal
 from http.client import RemoteDisconnected
 from typing import Any
+from urllib.parse import quote
+from urllib.request import Request, urlopen
 
 import pandas as pd
 import streamlit as st
@@ -478,17 +480,120 @@ def load_krx_ticker_name_map() -> pd.DataFrame:
     return out.reindex(columns=required_cols)
 
 
+def match_symbol_in_universe(
+    token: str,
+    universe: pd.DataFrame,
+    required_cols: list[str],
+) -> tuple[str | None, pd.DataFrame, str]:
+    if universe.empty:
+        return None, pd.DataFrame(columns=required_cols), "not_found"
+
+    work = universe.reindex(columns=required_cols).copy()
+    work["name"] = work["name"].astype(str)
+    token_key = "".join(token.split()).lower()
+    work["name_key"] = work["name"].str.replace(r"\s+", "", regex=True).str.lower()
+
+    exact = work[work["name"] == token]
+    if len(exact) == 1:
+        return str(exact.iloc[0]["ticker"]), exact[required_cols], "resolved"
+    if len(exact) > 1:
+        return None, exact[required_cols].head(20), "ambiguous"
+
+    exact_key = work[work["name_key"] == token_key]
+    if len(exact_key) == 1:
+        return str(exact_key.iloc[0]["ticker"]), exact_key[required_cols], "resolved"
+    if len(exact_key) > 1:
+        return None, exact_key[required_cols].head(20), "ambiguous"
+
+    contains = work[work["name"].str.contains(token, case=False, na=False, regex=False)]
+    if contains.empty and token_key:
+        contains = work[work["name_key"].str.contains(token_key, na=False, regex=False)]
+    if len(contains) == 1:
+        return str(contains.iloc[0]["ticker"]), contains[required_cols], "resolved"
+    if len(contains) > 1:
+        return None, contains[required_cols].head(20), "ambiguous"
+    return None, pd.DataFrame(columns=required_cols), "not_found"
+
+
+@st.cache_data(show_spinner=False, ttl=60 * 30)
+def search_symbol_candidates_online(query: str) -> pd.DataFrame:
+    required_cols = ["ticker", "name", "market"]
+    token = str(query).strip()
+    if not token:
+        return pd.DataFrame(columns=required_cols)
+
+    rows: list[dict[str, str]] = []
+
+    def add_candidate(code: Any, name: Any, market: Any = "-") -> None:
+        code_s = str(code).strip()
+        name_s = str(name).strip()
+        if len(code_s) == 6 and code_s.isdigit() and name_s:
+            rows.append({"ticker": code_s, "name": name_s, "market": str(market or "-").strip() or "-"})
+
+    def walk(item: Any) -> None:
+        if isinstance(item, dict):
+            add_candidate(
+                item.get("itemCode") or item.get("stockCode") or item.get("code"),
+                item.get("stockName") or item.get("itemName") or item.get("name") or item.get("nm"),
+                item.get("marketType") or item.get("market") or item.get("mk") or "-",
+            )
+            for value in item.values():
+                walk(value)
+        elif isinstance(item, list):
+            if len(item) >= 2 and isinstance(item[0], str) and isinstance(item[1], str):
+                add_candidate(item[0], item[1], item[2] if len(item) > 2 else "-")
+            for value in item:
+                walk(value)
+
+    headers = {
+        "User-Agent": "Mozilla/5.0",
+        "Accept": "application/json,text/plain,*/*",
+    }
+    endpoints = (
+        f"https://m.stock.naver.com/api/search?query={quote(token)}",
+        f"https://ac.stock.naver.com/ac?q={quote(token)}&q_enc=UTF-8&st=111&r=1",
+    )
+
+    for endpoint in endpoints:
+        try:
+            req = Request(endpoint, headers=headers)
+            with urlopen(req, timeout=6) as resp:
+                body = resp.read().decode("utf-8", errors="ignore")
+        except Exception:
+            continue
+
+        payload: Any = None
+        try:
+            payload = json.loads(body)
+        except json.JSONDecodeError:
+            left = body.find("{")
+            right = body.rfind("}")
+            if left >= 0 and right > left:
+                try:
+                    payload = json.loads(body[left : right + 1])
+                except json.JSONDecodeError:
+                    payload = None
+        if payload is None:
+            continue
+        walk(payload)
+        if rows:
+            break
+
+    if not rows:
+        return pd.DataFrame(columns=required_cols)
+    out = pd.DataFrame(rows).drop_duplicates(subset=["ticker"], keep="first")
+    return out.reindex(columns=required_cols)
+
+
 def resolve_symbol_input(query: str) -> tuple[str | None, pd.DataFrame, str]:
     token = query.strip()
     if not token:
         return None, pd.DataFrame(), "empty"
 
     required_cols = ["ticker", "name", "market"]
-    universe_loaded = True
     try:
         universe = load_krx_ticker_name_map()
     except Exception:
-        universe_loaded = False
         universe = pd.DataFrame(columns=required_cols)
     else:
         universe = universe.reindex(columns=required_cols)
@@ -496,33 +601,17 @@ def resolve_symbol_input(query: str) -> tuple[str | None, pd.DataFrame, str]:
     if token.isdigit() and len(token) == 6:
         return token, universe[universe["ticker"].astype(str) == token].head(10), "resolved"
 
-    if universe.empty:
-        return None, pd.DataFrame(), ("universe_unavailable" if not universe_loaded else "not_found")
+    symbol, candidates, state = match_symbol_in_universe(token, universe, required_cols)
+    if state in {"resolved", "ambiguous"}:
+        return symbol, candidates, state
 
-    token_key = "".join(token.split()).lower()
-    universe = universe.copy()
-    universe["name"] = universe["name"].astype(str)
-    universe["name_key"] = universe["name"].str.replace(r"\s+", "", regex=True).str.lower()
+    online = search_symbol_candidates_online(token)
+    symbol_online, candidates_online, state_online = match_symbol_in_universe(token, online, required_cols)
+    if state_online in {"resolved", "ambiguous"}:
+        return symbol_online, candidates_online, state_online
 
-    exact = universe[universe["name"] == token]
-    if len(exact) == 1:
-        return str(exact.iloc[0]["ticker"]), exact[required_cols], "resolved"
-    if len(exact) > 1:
-        return None, exact[required_cols].head(20), "ambiguous"
-
-    exact_key = universe[universe["name_key"] == token_key]
-    if len(exact_key) == 1:
-        return str(exact_key.iloc[0]["ticker"]), exact_key[required_cols], "resolved"
-    if len(exact_key) > 1:
-        return None, exact_key[required_cols].head(20), "ambiguous"
-
-    contains = universe[universe["name"].str.contains(token, case=False, na=False, regex=False)]
-    if contains.empty and token_key:
-        contains = universe[universe["name_key"].str.contains(token_key, na=False, regex=False)]
-    if len(contains) == 1:
-        return str(contains.iloc[0]["ticker"]), contains[required_cols], "resolved"
-    if len(contains) > 1:
-        return None, contains[required_cols].head(20), "ambiguous"
+    if universe.empty and online.empty:
+        return None, pd.DataFrame(columns=required_cols), "universe_unavailable"
     return None, pd.DataFrame(columns=required_cols), "not_found"
 
 
