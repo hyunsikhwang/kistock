@@ -442,39 +442,103 @@ def adjust_chart_for_split(df: pd.DataFrame, threshold: float = 1.7) -> pd.DataF
 @st.cache_data(show_spinner=False, ttl=60 * 60 * 6)
 def load_krx_ticker_name_map() -> pd.DataFrame:
     required_cols = ["ticker", "name", "market"]
-    market_params = (
-        ("KOSPI", "stockMkt"),
-        ("KOSDAQ", "kosdaqMkt"),
-        ("KONEX", "konexMkt"),
-    )
     rows: list[dict[str, str]] = []
 
-    for market, market_type in market_params:
-        url = (
-            "https://kind.krx.co.kr/corpgeneral/corpList.do"
-            f"?method=download&searchType=13&marketType={market_type}"
-        )
-        try:
-            tables = pd.read_html(url, encoding="euc-kr")
-        except Exception:
-            continue
-        if not tables:
-            continue
+    market_params = (
+        ("KOSPI", "0"),
+        ("KOSDAQ", "1"),
+        ("KONEX", "2"),
+    )
 
-        df = tables[0]
-        if df is None or df.empty:
-            continue
-        if "회사명" not in df.columns or "종목코드" not in df.columns:
-            continue
+    # 1) 네이버 시장별 시세 JSON (HTML 파서 의존 없음)
+    for market, sosok in market_params:
+        for page in range(1, 60):
+            endpoint = (
+                "https://m.stock.naver.com/api/json/sise/siseListJson.nhn"
+                f"?menu=market_sum&sosok={sosok}&pageSize=200&page={page}"
+            )
+            try:
+                req = Request(
+                    endpoint,
+                    headers={
+                        "User-Agent": "Mozilla/5.0",
+                        "Accept": "application/json,text/plain,*/*",
+                    },
+                )
+                with urlopen(req, timeout=6) as resp:
+                    payload = json.loads(resp.read().decode("utf-8", errors="ignore"))
+            except Exception:
+                break
 
-        work = df[["회사명", "종목코드"]].dropna().copy()
-        work["ticker"] = work["종목코드"].astype(str).str.zfill(6)
-        work["name"] = work["회사명"].astype(str).str.strip()
-        work["market"] = market
-        rows.extend(work[["ticker", "name", "market"]].to_dict(orient="records"))
+            items: list[dict[str, Any]] = []
+            if isinstance(payload, dict):
+                if isinstance(payload.get("result"), list):
+                    items = payload["result"]
+                elif isinstance(payload.get("result"), dict) and isinstance(payload["result"].get("itemList"), list):
+                    items = payload["result"]["itemList"]
+                elif isinstance(payload.get("siseList"), list):
+                    items = payload["siseList"]
+            elif isinstance(payload, list):
+                items = payload
+
+            if not items:
+                break
+
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                code = str(item.get("cd", "")).strip()
+                name = str(item.get("nm", "")).strip()
+                if len(code) == 6 and code.isdigit() and name:
+                    rows.append({"ticker": code, "name": name, "market": market})
 
     if not rows:
-        return pd.DataFrame(columns=required_cols)
+        # 2) KRX 상장법인 HTML fallback
+        html_market_params = (
+            ("KOSPI", "stockMkt"),
+            ("KOSDAQ", "kosdaqMkt"),
+            ("KONEX", "konexMkt"),
+        )
+        for market, market_type in html_market_params:
+            url = (
+                "https://kind.krx.co.kr/corpgeneral/corpList.do"
+                f"?method=download&searchType=13&marketType={market_type}"
+            )
+            try:
+                tables = pd.read_html(url, encoding="euc-kr")
+            except Exception:
+                continue
+            if not tables:
+                continue
+
+            df = tables[0]
+            if df is None or df.empty:
+                continue
+            if "회사명" not in df.columns or "종목코드" not in df.columns:
+                continue
+
+            work = df[["회사명", "종목코드"]].dropna().copy()
+            work["ticker"] = work["종목코드"].astype(str).str.zfill(6)
+            work["name"] = work["회사명"].astype(str).str.strip()
+            work["market"] = market
+            rows.extend(work[["ticker", "name", "market"]].to_dict(orient="records"))
+
+    if not rows:
+        # 3) 최후 fallback: 핵심 대형주 alias
+        rows.extend(
+            [
+                {"ticker": "005930", "name": "삼성전자", "market": "KOSPI"},
+                {"ticker": "000660", "name": "SK하이닉스", "market": "KOSPI"},
+                {"ticker": "035420", "name": "NAVER", "market": "KOSPI"},
+                {"ticker": "035720", "name": "카카오", "market": "KOSPI"},
+                {"ticker": "005380", "name": "현대차", "market": "KOSPI"},
+                {"ticker": "068270", "name": "셀트리온", "market": "KOSPI"},
+                {"ticker": "207940", "name": "삼성바이오로직스", "market": "KOSPI"},
+                {"ticker": "051910", "name": "LG화학", "market": "KOSPI"},
+                {"ticker": "006400", "name": "삼성SDI", "market": "KOSPI"},
+                {"ticker": "323410", "name": "카카오뱅크", "market": "KOSPI"},
+            ]
+        )
 
     out = pd.DataFrame(rows).drop_duplicates(subset=["ticker"], keep="first")
     return out.reindex(columns=required_cols)
