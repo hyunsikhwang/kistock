@@ -444,35 +444,52 @@ def load_krx_ticker_name_map() -> pd.DataFrame:
     return df.reindex(columns=required_cols)
 
 
-def resolve_symbol_input(query: str) -> tuple[str | None, pd.DataFrame]:
+def resolve_symbol_input(query: str) -> tuple[str | None, pd.DataFrame, str]:
     token = query.strip()
     if not token:
-        return None, pd.DataFrame()
+        return None, pd.DataFrame(), "empty"
 
     required_cols = ["ticker", "name", "market"]
+    universe_loaded = True
     try:
         universe = load_krx_ticker_name_map()
     except Exception:
+        universe_loaded = False
         universe = pd.DataFrame(columns=required_cols)
     else:
         universe = universe.reindex(columns=required_cols)
 
     if token.isdigit() and len(token) == 6:
-        return token, universe[universe["ticker"].astype(str) == token].head(10)
+        return token, universe[universe["ticker"].astype(str) == token].head(10), "resolved"
 
     if universe.empty:
-        return None, pd.DataFrame()
+        return None, pd.DataFrame(), ("universe_unavailable" if not universe_loaded else "not_found")
+
+    token_key = "".join(token.split()).lower()
+    universe = universe.copy()
+    universe["name"] = universe["name"].astype(str)
+    universe["name_key"] = universe["name"].str.replace(r"\s+", "", regex=True).str.lower()
 
     exact = universe[universe["name"] == token]
     if len(exact) == 1:
-        return str(exact.iloc[0]["ticker"]), exact
+        return str(exact.iloc[0]["ticker"]), exact[required_cols], "resolved"
     if len(exact) > 1:
-        return None, exact.head(20)
+        return None, exact[required_cols].head(20), "ambiguous"
 
-    contains = universe[universe["name"].str.contains(token, case=False, na=False)]
+    exact_key = universe[universe["name_key"] == token_key]
+    if len(exact_key) == 1:
+        return str(exact_key.iloc[0]["ticker"]), exact_key[required_cols], "resolved"
+    if len(exact_key) > 1:
+        return None, exact_key[required_cols].head(20), "ambiguous"
+
+    contains = universe[universe["name"].str.contains(token, case=False, na=False, regex=False)]
+    if contains.empty and token_key:
+        contains = universe[universe["name_key"].str.contains(token_key, na=False, regex=False)]
     if len(contains) == 1:
-        return str(contains.iloc[0]["ticker"]), contains
-    return None, contains.head(20)
+        return str(contains.iloc[0]["ticker"]), contains[required_cols], "resolved"
+    if len(contains) > 1:
+        return None, contains[required_cols].head(20), "ambiguous"
+    return None, pd.DataFrame(columns=required_cols), "not_found"
 
 
 def normalize_chart_df(df: pd.DataFrame) -> pd.DataFrame:
@@ -660,9 +677,11 @@ if not submitted:
     st.info("상단에서 종목명(또는 종목코드)과 기간을 선택한 뒤 `시세 조회`를 눌러주세요.")
     st.stop()
 
-symbol, candidates = resolve_symbol_input(symbol_input)
+symbol, candidates, resolve_state = resolve_symbol_input(symbol_input)
 if symbol is None:
-    if candidates.empty:
+    if resolve_state == "universe_unavailable":
+        st.warning("종목명 DB를 불러오지 못했습니다. 잠시 후 다시 시도해 주세요.")
+    elif candidates.empty:
         st.warning("종목을 찾지 못했습니다. 정확한 종목명 또는 6자리 종목코드를 입력해 주세요.")
     else:
         st.warning("동일/유사한 종목명이 여러 개입니다. 아래 후보 중 정확한 종목명을 입력해 주세요.")
