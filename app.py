@@ -165,15 +165,32 @@ def classify_relative_level(value: Any, baseline: Any) -> tuple[str, str]:
 
 @st.cache_data(show_spinner=False, ttl=60 * 60 * 6)
 def load_market_fundamental(date: str, market: str) -> pd.DataFrame:
-    df = krx_stock.get_market_fundamental_by_ticker(date=date, market=market)
-    if df is None or df.empty:
-        return pd.DataFrame(columns=["ticker", "PER", "PBR"])
-    out = df.reset_index().rename(columns={"티커": "ticker"})
-    if "PER" not in out.columns:
-        out["PER"] = None
-    if "PBR" not in out.columns:
-        out["PBR"] = None
-    return out[["ticker", "PER", "PBR"]]
+    required_cols = ["ticker", "PER", "PBR"]
+
+    try:
+        base_dt = datetime.strptime(date, "%Y%m%d")
+    except ValueError:
+        base_dt = datetime.now()
+
+    for offset in range(0, 7):
+        target = (base_dt - timedelta(days=offset)).strftime("%Y%m%d")
+        try:
+            df = krx_stock.get_market_fundamental_by_ticker(date=target, market=market)
+        except Exception:
+            continue
+        if df is None or df.empty:
+            continue
+
+        out = df.reset_index().rename(columns={"티커": "ticker"})
+        if "ticker" not in out.columns and len(out.columns) > 0:
+            out = out.rename(columns={out.columns[0]: "ticker"})
+        if "PER" not in out.columns:
+            out["PER"] = None
+        if "PBR" not in out.columns:
+            out["PBR"] = None
+        return out.reindex(columns=required_cols)
+
+    return pd.DataFrame(columns=required_cols)
 
 
 @st.cache_data(show_spinner=False, ttl=60 * 60 * 6)
