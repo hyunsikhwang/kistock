@@ -442,14 +442,43 @@ def load_krx_ticker_name_map() -> pd.DataFrame:
     required_cols = ["ticker", "name", "market"]
     rows: list[dict[str, str]] = []
     markets = ("KOSPI", "KOSDAQ", "KONEX")
-    # 휴장일/장마감 직후 등으로 당일 데이터가 비는 경우를 대비해 최근 7일을 역순 조회
+
+    def extend_rows_from_price_change(target: str, market: str) -> bool:
+        # 종목명 일괄 조회(시장별 1회)로 요청 수를 줄여 안정성 확보
+        try:
+            df = krx_stock.get_market_price_change_by_ticker(target, target, market=market)
+        except Exception:
+            return False
+        if df is None or df.empty:
+            return False
+
+        out = df.reset_index().rename(columns={"티커": "ticker", "종목명": "name"})
+        if "ticker" not in out.columns and len(out.columns) > 0:
+            out = out.rename(columns={out.columns[0]: "ticker"})
+        if "name" not in out.columns:
+            return False
+
+        for row in out[["ticker", "name"]].dropna().itertuples(index=False):
+            rows.append({"ticker": str(row.ticker), "name": str(row.name), "market": market})
+        return True
+
     for offset in range(0, 7):
         target = (datetime.now() - timedelta(days=offset)).strftime("%Y%m%d")
         rows.clear()
         for market in markets:
-            tickers = krx_stock.get_market_ticker_list(date=target, market=market)
+            loaded = extend_rows_from_price_change(target, market)
+            if loaded:
+                continue
+            # fallback: 일부 환경에서 일괄 조회가 실패할 경우 기존 방식 유지
+            try:
+                tickers = krx_stock.get_market_ticker_list(date=target, market=market)
+            except Exception:
+                continue
             for ticker in tickers:
-                name = krx_stock.get_market_ticker_name(ticker)
+                try:
+                    name = krx_stock.get_market_ticker_name(ticker)
+                except Exception:
+                    continue
                 if name:
                     rows.append({"ticker": str(ticker), "name": str(name), "market": market})
         if rows:
