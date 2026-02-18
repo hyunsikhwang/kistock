@@ -4,7 +4,7 @@ import json
 import os
 import tempfile
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal
 from http.client import RemoteDisconnected
 from typing import Any
@@ -400,15 +400,26 @@ def adjust_chart_for_split(df: pd.DataFrame, threshold: float = 1.7) -> pd.DataF
 
 @st.cache_data(show_spinner=False, ttl=60 * 60 * 6)
 def load_krx_ticker_name_map() -> pd.DataFrame:
-    today = datetime.now().strftime("%Y%m%d")
+    required_cols = ["ticker", "name", "market"]
     rows: list[dict[str, str]] = []
-    for market in ("KOSPI", "KOSDAQ", "KONEX"):
-        tickers = krx_stock.get_market_ticker_list(date=today, market=market)
-        for ticker in tickers:
-            name = krx_stock.get_market_ticker_name(ticker)
-            if name:
-                rows.append({"ticker": ticker, "name": str(name), "market": market})
-    return pd.DataFrame(rows)
+    markets = ("KOSPI", "KOSDAQ", "KONEX")
+    # 휴장일/장마감 직후 등으로 당일 데이터가 비는 경우를 대비해 최근 7일을 역순 조회
+    for offset in range(0, 7):
+        target = (datetime.now() - timedelta(days=offset)).strftime("%Y%m%d")
+        rows.clear()
+        for market in markets:
+            tickers = krx_stock.get_market_ticker_list(date=target, market=market)
+            for ticker in tickers:
+                name = krx_stock.get_market_ticker_name(ticker)
+                if name:
+                    rows.append({"ticker": str(ticker), "name": str(name), "market": market})
+        if rows:
+            break
+
+    df = pd.DataFrame(rows)
+    if df.empty:
+        return pd.DataFrame(columns=required_cols)
+    return df.reindex(columns=required_cols)
 
 
 def resolve_symbol_input(query: str) -> tuple[str | None, pd.DataFrame]:
@@ -416,13 +427,16 @@ def resolve_symbol_input(query: str) -> tuple[str | None, pd.DataFrame]:
     if not token:
         return None, pd.DataFrame()
 
+    required_cols = ["ticker", "name", "market"]
     try:
         universe = load_krx_ticker_name_map()
     except Exception:
-        universe = pd.DataFrame(columns=["ticker", "name", "market"])
+        universe = pd.DataFrame(columns=required_cols)
+    else:
+        universe = universe.reindex(columns=required_cols)
 
     if token.isdigit() and len(token) == 6:
-        return token, universe[universe["ticker"] == token].head(10)
+        return token, universe[universe["ticker"].astype(str) == token].head(10)
 
     if universe.empty:
         return None, pd.DataFrame()
