@@ -440,97 +440,42 @@ def adjust_chart_for_split(df: pd.DataFrame, threshold: float = 1.7) -> pd.DataF
 @st.cache_data(show_spinner=False, ttl=60 * 60 * 6)
 def load_krx_ticker_name_map() -> pd.DataFrame:
     required_cols = ["ticker", "name", "market"]
+    market_params = (
+        ("KOSPI", "stockMkt"),
+        ("KOSDAQ", "kosdaqMkt"),
+        ("KONEX", "konexMkt"),
+    )
     rows: list[dict[str, str]] = []
-    markets = ("KOSPI", "KOSDAQ", "KONEX")
 
-    def extend_rows_from_price_change(target: str, market: str) -> bool:
-        # 종목명 일괄 조회(시장별 1회)로 요청 수를 줄여 안정성 확보
+    for market, market_type in market_params:
+        url = (
+            "https://kind.krx.co.kr/corpgeneral/corpList.do"
+            f"?method=download&searchType=13&marketType={market_type}"
+        )
         try:
-            df = krx_stock.get_market_price_change_by_ticker(target, target, market=market)
+            tables = pd.read_html(url, encoding="euc-kr")
         except Exception:
-            return False
+            continue
+        if not tables:
+            continue
+
+        df = tables[0]
         if df is None or df.empty:
-            return False
+            continue
+        if "회사명" not in df.columns or "종목코드" not in df.columns:
+            continue
 
-        out = df.reset_index().rename(columns={"티커": "ticker", "종목명": "name"})
-        if "ticker" not in out.columns and len(out.columns) > 0:
-            out = out.rename(columns={out.columns[0]: "ticker"})
-        if "name" not in out.columns:
-            return False
+        work = df[["회사명", "종목코드"]].dropna().copy()
+        work["ticker"] = work["종목코드"].astype(str).str.zfill(6)
+        work["name"] = work["회사명"].astype(str).str.strip()
+        work["market"] = market
+        rows.extend(work[["ticker", "name", "market"]].to_dict(orient="records"))
 
-        for row in out[["ticker", "name"]].dropna().itertuples(index=False):
-            rows.append({"ticker": str(row.ticker), "name": str(row.name), "market": market})
-        return True
-
-    for offset in range(0, 7):
-        target = (datetime.now() - timedelta(days=offset)).strftime("%Y%m%d")
-        rows.clear()
-        for market in markets:
-            loaded = extend_rows_from_price_change(target, market)
-            if loaded:
-                continue
-            # fallback: 일부 환경에서 일괄 조회가 실패할 경우 기존 방식 유지
-            try:
-                tickers = krx_stock.get_market_ticker_list(date=target, market=market)
-            except Exception:
-                continue
-            for ticker in tickers:
-                try:
-                    name = krx_stock.get_market_ticker_name(ticker)
-                except Exception:
-                    continue
-                if name:
-                    rows.append({"ticker": str(ticker), "name": str(name), "market": market})
-        if rows:
-            break
-
-    df = pd.DataFrame(rows)
-    if df.empty:
-        return pd.DataFrame(columns=required_cols)
-    return df.reindex(columns=required_cols)
-
-
-@st.cache_data(show_spinner=False, ttl=60 * 60 * 12)
-def find_ticker_by_exact_name_fallback(name_query: str) -> pd.DataFrame:
-    required_cols = ["ticker", "name", "market"]
-    token = str(name_query).strip()
-    if not token:
+    if not rows:
         return pd.DataFrame(columns=required_cols)
 
-    token_key = "".join(token.split()).lower()
-    rows: list[dict[str, str]] = []
-
-    # 즉시 대응용 고정 alias (외부 데이터 조회가 불안정할 때 최소 보장)
-    static_alias = {"삼성전자": "005930"}
-    if token in static_alias:
-        rows.append({"ticker": static_alias[token], "name": token, "market": "KOSPI"})
-        return pd.DataFrame(rows).reindex(columns=required_cols)
-
-    markets = ("KOSPI", "KOSDAQ", "KONEX")
-    for offset in range(0, 7):
-        target = (datetime.now() - timedelta(days=offset)).strftime("%Y%m%d")
-        rows.clear()
-        for market in markets:
-            try:
-                tickers = krx_stock.get_market_ticker_list(date=target, market=market)
-            except Exception:
-                continue
-
-            for ticker in tickers:
-                try:
-                    nm = krx_stock.get_market_ticker_name(ticker)
-                except Exception:
-                    continue
-                if not nm:
-                    continue
-                nm_s = str(nm)
-                nm_key = "".join(nm_s.split()).lower()
-                if nm_s == token or nm_key == token_key:
-                    rows.append({"ticker": str(ticker), "name": nm_s, "market": market})
-        if rows:
-            return pd.DataFrame(rows).drop_duplicates(subset=["ticker"]).reindex(columns=required_cols)
-
-    return pd.DataFrame(columns=required_cols)
+    out = pd.DataFrame(rows).drop_duplicates(subset=["ticker"], keep="first")
+    return out.reindex(columns=required_cols)
 
 
 def resolve_symbol_input(query: str) -> tuple[str | None, pd.DataFrame, str]:
@@ -552,11 +497,6 @@ def resolve_symbol_input(query: str) -> tuple[str | None, pd.DataFrame, str]:
         return token, universe[universe["ticker"].astype(str) == token].head(10), "resolved"
 
     if universe.empty:
-        fallback = find_ticker_by_exact_name_fallback(token)
-        if len(fallback) == 1:
-            return str(fallback.iloc[0]["ticker"]), fallback, "resolved"
-        if len(fallback) > 1:
-            return None, fallback.head(20), "ambiguous"
         return None, pd.DataFrame(), ("universe_unavailable" if not universe_loaded else "not_found")
 
     token_key = "".join(token.split()).lower()
@@ -583,11 +523,6 @@ def resolve_symbol_input(query: str) -> tuple[str | None, pd.DataFrame, str]:
         return str(contains.iloc[0]["ticker"]), contains[required_cols], "resolved"
     if len(contains) > 1:
         return None, contains[required_cols].head(20), "ambiguous"
-    fallback = find_ticker_by_exact_name_fallback(token)
-    if len(fallback) == 1:
-        return str(fallback.iloc[0]["ticker"]), fallback, "resolved"
-    if len(fallback) > 1:
-        return None, fallback.head(20), "ambiguous"
     return None, pd.DataFrame(columns=required_cols), "not_found"
 
 
