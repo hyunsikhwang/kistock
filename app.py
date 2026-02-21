@@ -165,6 +165,73 @@ def classify_relative_level(value: Any, baseline: Any) -> tuple[str, str]:
     return "고", "#ef4444"
 
 
+def compute_band_position(current: Any, low: Any, high: Any) -> dict[str, float] | None:
+    c = to_float(current)
+    lo = to_float(low)
+    hi = to_float(high)
+    if c is None or lo is None or hi is None or hi <= lo:
+        return None
+
+    span = hi - lo
+    position_from_low = max(0.0, min(1.0, (c - lo) / span))
+    distance_from_high = max(0.0, min(1.0, (hi - c) / span))
+    return {
+        "position_from_low": position_from_low,
+        "distance_from_high": distance_from_high,
+        "marker_percent": position_from_low * 100.0,
+    }
+
+
+def render_band_position_card(
+    title: str,
+    current: float,
+    low: float,
+    high: float,
+    position_from_low: float,
+    distance_from_high: float,
+    marker_percent: float,
+) -> None:
+    st.markdown(f"**{title}**")
+    st.markdown(
+        f"""
+<div class="card" style="margin-top:.3rem;padding:.85rem .95rem;">
+  <div style="font-size:.9rem;color:#1e293b;font-weight:600;line-height:1.4;">
+    저가 대비 <span style="color:#2563eb;">{position_from_low * 100:.1f}%</span> 지점
+    <span style="color:#cbd5e1;padding:0 .25rem;">|</span>
+    고가 대비 <span style="color:#f97316;">{distance_from_high * 100:.1f}%</span> 지점
+  </div>
+  <div style="font-size:.79rem;color:#64748b;margin-top:.2rem;">
+    현재가 {fmt_num(current)}원 · 밴드 {fmt_num(low)} ~ {fmt_num(high)}원
+  </div>
+  <div style="margin-top:.6rem;">
+    <div style="position:relative;height:16px;border-radius:999px;background:#e2e8f0;overflow:visible;">
+      <div style="position:absolute;left:0;top:0;height:100%;width:{marker_percent:.2f}%;background:#60a5fa;border-radius:999px;"></div>
+      <div style="position:absolute;left:{marker_percent:.2f}%;top:-8px;transform:translateX(-50%);width:2px;height:32px;background:#0f172a;"></div>
+      <div style="position:absolute;left:{marker_percent:.2f}%;top:-14px;transform:translateX(-50%);width:14px;height:14px;border-radius:50%;background:#0f172a;border:2px solid #fff;"></div>
+      <div style="position:absolute;left:50%;top:-2px;transform:translateX(-50%);width:1px;height:20px;background:#94a3b8;"></div>
+    </div>
+    <div style="display:flex;justify-content:space-between;font-size:.74rem;color:#64748b;margin-top:.28rem;gap:.55rem;line-height:1.25;">
+      <span>저가 {fmt_num(low)}</span>
+      <span>중간 50%</span>
+      <span>고가 {fmt_num(high)}</span>
+    </div>
+    <div style="font-size:.74rem;color:#334155;font-weight:600;margin-top:.12rem;text-align:center;">
+      현재가 위치 {marker_percent:.1f}%
+    </div>
+  </div>
+</div>
+<style>
+@media (max-width: 640px) {{
+  div[data-testid="stMarkdownContainer"] .card {{
+    padding: .75rem .75rem !important;
+  }}
+}}
+</style>
+""",
+        unsafe_allow_html=True,
+    )
+
+
 @st.cache_data(show_spinner=False, ttl=60 * 60 * 6)
 def load_market_fundamental(date: str, market: str) -> pd.DataFrame:
     required_cols = ["ticker", "PER", "PBR"]
@@ -969,16 +1036,32 @@ current = to_float(price)
 period_low = to_float(chart_df["low"].min()) if not chart_df.empty else None
 period_high = to_float(chart_df["high"].max()) if not chart_df.empty else None
 
-if period_low is not None and period_high is not None and current is not None and period_high > period_low:
-    pos = (current - period_low) / (period_high - period_low)
-    pos = max(0.0, min(1.0, pos))
-    st.markdown(f"**선택 기간({PERIOD_LABELS.get(period, period)}) 밴드 내 현재 위치 (분할 보정)**")
-    st.progress(pos, text=f"기간 저가 대비 {pos * 100:.1f}% 지점")
-elif range_low is not None and range_high is not None and current is not None and range_high > range_low:
-    pos = (current - range_low) / (range_high - range_low)
-    pos = max(0.0, min(1.0, pos))
-    st.markdown("**52주 밴드 내 현재 위치**")
-    st.progress(pos, text=f"52주 저가 대비 {pos * 100:.1f}% 지점")
+band_title = ""
+band_low: float | None = None
+band_high: float | None = None
+
+if period_low is not None and period_high is not None and period_high > period_low:
+    band_title = f"선택 기간({PERIOD_LABELS.get(period, period)}) 밴드 내 현재 위치 (분할 보정)"
+    band_low = period_low
+    band_high = period_high
+elif range_low is not None and range_high is not None and range_high > range_low:
+    band_title = "52주 밴드 내 현재 위치"
+    band_low = range_low
+    band_high = range_high
+
+band_position = compute_band_position(current, band_low, band_high)
+if band_position is None or current is None or band_low is None or band_high is None:
+    st.info("밴드 계산에 필요한 고가/저가 데이터가 부족합니다.")
+else:
+    render_band_position_card(
+        title=band_title,
+        current=current,
+        low=band_low,
+        high=band_high,
+        position_from_low=band_position["position_from_low"],
+        distance_from_high=band_position["distance_from_high"],
+        marker_percent=band_position["marker_percent"],
+    )
 
 st_pyecharts(make_kline_chart(chart_df, symbol, name), height="640px")
 
