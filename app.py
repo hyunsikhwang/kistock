@@ -1002,9 +1002,6 @@ w52_high = get_path_attr(quote, "indicator.week52_high")
 w52_low = get_path_attr(quote, "indicator.week52_low")
 w52_high_date = get_path_attr(quote, "indicator.week52_high_date")
 w52_low_date = get_path_attr(quote, "indicator.week52_low_date")
-per_base, pbr_base, base_label = get_peer_valuation_baseline(fmt_text(sector_name), fmt_text(market))
-per_level, per_color = classify_relative_level(per, per_base)
-pbr_level, pbr_color = classify_relative_level(pbr, pbr_base)
 st.markdown(f"## {fmt_text(name)} ({symbol})")
 st.caption(f"{fmt_text(sector_name)} | {fmt_text(market)} | {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 기준")
 
@@ -1013,22 +1010,6 @@ k1.metric("현재가", f"{fmt_num(price)}원", fmt_delta_compact(change, rate))
 k2.metric("시가총액", fmt_money_kr(market_cap), f"거래대금 {fmt_money_kr(amount)}")
 k3.metric("PER / PBR", f"{fmt_num(per, 2)} / {fmt_num(pbr, 2)}", f"EPS {fmt_num(eps)}")
 k4.metric("52주 범위", f"{fmt_num(w52_low)} ~ {fmt_num(w52_high)}", f"BPS {fmt_num(bps)}")
-
-st.markdown(
-    f"""
-<div class="card" style="margin-top: .35rem;">
-  <div style="font-size:.84rem;color:#64748b;margin-bottom:.35rem;">Valuation 상대 수준 ({base_label} 기준)</div>
-  <div style="display:flex;gap:.6rem;flex-wrap:wrap;">
-    <span style="padding:.2rem .55rem;border-radius:999px;background:{per_color};color:#fff;font-size:.82rem;">PER: {per_level}</span>
-    <span style="padding:.2rem .55rem;border-radius:999px;background:{pbr_color};color:#fff;font-size:.82rem;">PBR: {pbr_level}</span>
-    <span style="padding:.2rem .55rem;border-radius:999px;background:#e2e8f0;color:#0f172a;font-size:.82rem;">
-      평균 PER/PBR {fmt_num(per_base,2)} / {fmt_num(pbr_base,2)}
-    </span>
-  </div>
-</div>
-""",
-    unsafe_allow_html=True,
-)
 
 range_low = to_float(w52_low)
 range_high = to_float(w52_high)
