@@ -5,6 +5,7 @@ import os
 import tempfile
 import time
 from datetime import datetime, timedelta
+from pathlib import Path
 from decimal import Decimal
 from http.client import RemoteDisconnected
 from typing import Any
@@ -28,6 +29,7 @@ PERIOD_LABELS = {
     "3y": "3년",
 }
 PERIOD_TO_DAYS = {"1m": 30, "3m": 90, "6m": 180, "1y": 365, "3y": 365 * 3}
+PORTFOLIO_SYMBOLS_FILE = Path(__file__).with_name("portfolio_symbols.txt")
 
 
 st.set_page_config(
@@ -230,6 +232,18 @@ def render_band_position_card(
 """,
         unsafe_allow_html=True,
     )
+
+
+def load_portfolio_symbols(file_path: Path = PORTFOLIO_SYMBOLS_FILE) -> list[str]:
+    if not file_path.exists():
+        return []
+    items: list[str] = []
+    for line in file_path.read_text(encoding="utf-8").splitlines():
+        name = line.strip()
+        if not name or name.startswith("#"):
+            continue
+        items.append(name)
+    return items
 
 
 @st.cache_data(show_spinner=False, ttl=60 * 60 * 6)
@@ -860,6 +874,94 @@ def make_kline_chart(df: pd.DataFrame, symbol: str, name: str) -> Grid:
     return grid
 
 
+def get_cached_quote_and_chart(
+    cache: dict[str, dict[str, Any]],
+    secret_json: str,
+    token_json: str | None,
+    symbol: str,
+) -> tuple[Any, pd.DataFrame, bool]:
+    cached = cache.get(symbol)
+    if cached and "quote" in cached and "base_chart_df" in cached:
+        return cached["quote"], cached["base_chart_df"], True
+
+    quote, base_chart_df = fetch_quote_and_chart(secret_json, token_json, symbol, max_attempts=3)
+    cache[symbol] = {"quote": quote, "base_chart_df": base_chart_df, "cached_at": datetime.now()}
+    return quote, base_chart_df, False
+
+
+def extract_quote_fields(quote: Any, symbol: str) -> dict[str, Any]:
+    return {
+        "symbol": symbol,
+        "name": get_path_attr(quote, "name", symbol),
+        "price": get_path_attr(quote, "price"),
+        "change": get_path_attr(quote, "change"),
+        "rate": get_path_attr(quote, "rate"),
+        "volume": get_path_attr(quote, "volume"),
+        "amount": get_path_attr(quote, "amount"),
+        "market_cap": get_path_attr(quote, "market_cap"),
+        "per": get_path_attr(quote, "indicator.per"),
+        "pbr": get_path_attr(quote, "indicator.pbr"),
+        "eps": get_path_attr(quote, "indicator.eps"),
+        "bps": get_path_attr(quote, "indicator.bps"),
+        "market": get_path_attr(quote, "market"),
+        "sector_name": get_path_attr(quote, "sector_name"),
+        "prev_price": get_path_attr(quote, "prev_price"),
+        "open_price": get_path_attr(quote, "open"),
+        "high_price": get_path_attr(quote, "high"),
+        "low_price": get_path_attr(quote, "low"),
+        "high_limit": get_path_attr(quote, "high_limit"),
+        "low_limit": get_path_attr(quote, "low_limit"),
+        "sign_name": get_path_attr(quote, "sign_name"),
+        "currency": get_path_attr(quote, "currency"),
+        "exchange_rate": get_path_attr(quote, "exchange_rate"),
+        "risk": get_path_attr(quote, "risk"),
+        "halt": get_path_attr(quote, "halt"),
+        "overbought": get_path_attr(quote, "overbought"),
+        "unit": get_path_attr(quote, "unit"),
+        "tick": get_path_attr(quote, "tick"),
+        "decimal_places": get_path_attr(quote, "decimal_places"),
+        "w52_high": get_path_attr(quote, "indicator.week52_high"),
+        "w52_low": get_path_attr(quote, "indicator.week52_low"),
+        "w52_high_date": get_path_attr(quote, "indicator.week52_high_date"),
+        "w52_low_date": get_path_attr(quote, "indicator.week52_low_date"),
+    }
+
+
+def build_band_context(quote_fields: dict[str, Any], chart_df: pd.DataFrame, period: str) -> dict[str, Any] | None:
+    current = to_float(quote_fields["price"])
+    period_low = to_float(chart_df["low"].min()) if not chart_df.empty else None
+    period_high = to_float(chart_df["high"].max()) if not chart_df.empty else None
+    range_low = to_float(quote_fields["w52_low"])
+    range_high = to_float(quote_fields["w52_high"])
+
+    band_title = ""
+    band_low: float | None = None
+    band_high: float | None = None
+
+    if period_low is not None and period_high is not None and period_high > period_low:
+        band_title = f"선택 기간({PERIOD_LABELS.get(period, period)}) 밴드 내 현재 위치 (분할 보정)"
+        band_low = period_low
+        band_high = period_high
+    elif range_low is not None and range_high is not None and range_high > range_low:
+        band_title = "52주 밴드 내 현재 위치"
+        band_low = range_low
+        band_high = range_high
+
+    band_position = compute_band_position(current, band_low, band_high)
+    if band_position is None or current is None or band_low is None or band_high is None:
+        return None
+
+    return {
+        "title": band_title,
+        "current": current,
+        "low": band_low,
+        "high": band_high,
+        "position_from_low": band_position["position_from_low"],
+        "distance_from_high": band_position["distance_from_high"],
+        "marker_percent": band_position["marker_percent"],
+    }
+
+
 def render_security_guide() -> None:
     st.markdown(
         """
@@ -906,7 +1008,7 @@ if not credentials:
 
 with st.container(border=True):
     with st.form("search_form", clear_on_submit=False):
-        f1, f2, f3 = st.columns([2.6, 1.2, 0.8])
+        f1, f2, f3, f4 = st.columns([2.5, 1.1, 0.7, 1.1])
         with f1:
             symbol_input = st.text_input("종목명 또는 종목코드", value="삼성전자").strip()
         with f2:
@@ -919,6 +1021,9 @@ with st.container(border=True):
         with f3:
             st.markdown("<div style='height:1.65rem;'></div>", unsafe_allow_html=True)
             submitted = st.form_submit_button("시세 조회", type="primary", use_container_width=True)
+        with f4:
+            st.markdown("<div style='height:1.65rem;'></div>", unsafe_allow_html=True)
+            portfolio_submitted = st.form_submit_button("포트폴리오 조회", use_container_width=True)
     st.markdown(
         f'<div class="hint">조회 시각: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}</div>',
         unsafe_allow_html=True,
@@ -927,8 +1032,73 @@ with st.container(border=True):
 with st.expander("보안 설정 안내", expanded=False):
     render_security_guide()
 
-if not submitted:
+if not submitted and not portfolio_submitted:
     st.info("상단에서 종목명(또는 종목코드)과 기간을 선택한 뒤 `시세 조회`를 눌러주세요.")
+    st.stop()
+
+secret_json = json.dumps(credentials["secret"], ensure_ascii=False)
+token_json = json.dumps(credentials["token"], ensure_ascii=False) if credentials["token"] else None
+
+if "quote_cache" not in st.session_state:
+    st.session_state["quote_cache"] = {}
+
+cache = st.session_state["quote_cache"]
+
+if portfolio_submitted:
+    portfolio_names = load_portfolio_symbols()
+    if not portfolio_names:
+        st.warning(f"포트폴리오 종목 파일이 비어 있습니다: {PORTFOLIO_SYMBOLS_FILE.name}")
+        st.stop()
+
+    st.markdown(f"## 포트폴리오 밴드 위치 ({PERIOD_LABELS.get(period, period)})")
+    st.caption(f"종목 목록 파일: {PORTFOLIO_SYMBOLS_FILE.name}")
+
+    progress = st.progress(0.0, text="포트폴리오 종목 확인 중...")
+    cards_rendered = 0
+    errors: list[str] = []
+    cols = st.columns(2)
+
+    for idx, item in enumerate(portfolio_names, start=1):
+        progress.progress(idx / len(portfolio_names), text=f"{item} 조회 중 ({idx}/{len(portfolio_names)})")
+        symbol, candidates, resolve_state = resolve_symbol_input(item)
+        if symbol is None:
+            if resolve_state == "ambiguous" and not candidates.empty:
+                candidate_names = ", ".join(candidates["name"].astype(str).head(3).tolist())
+                errors.append(f"{item}: 후보 다수({candidate_names})")
+            elif resolve_state == "universe_unavailable":
+                errors.append(f"{item}: 종목명 DB 조회 실패")
+            else:
+                errors.append(f"{item}: 종목을 찾지 못함")
+            continue
+
+        try:
+            quote, base_chart_df, _ = get_cached_quote_and_chart(cache, secret_json, token_json, symbol)
+        except Exception as e:
+            errors.append(f"{item}: 조회 오류 ({e})")
+            continue
+
+        quote_fields = extract_quote_fields(quote, symbol)
+        chart_df = filter_chart_by_period(base_chart_df, period)
+        band_context = build_band_context(quote_fields, chart_df, period)
+        if band_context is None:
+            errors.append(f"{item}: 밴드 계산 데이터 부족")
+            continue
+
+        with cols[cards_rendered % len(cols)]:
+            st.markdown(f"### {fmt_text(quote_fields['name'])} ({symbol})")
+            st.caption(
+                f"{fmt_text(quote_fields['sector_name'])} | {fmt_text(quote_fields['market'])} | 현재가 {fmt_num(quote_fields['price'])}원"
+            )
+            render_band_position_card(**band_context)
+        cards_rendered += 1
+
+    progress.empty()
+
+    if cards_rendered == 0:
+        st.warning("출력할 포트폴리오 밴드 카드가 없습니다.")
+    if errors:
+        st.warning("일부 종목은 처리하지 못했습니다.")
+        st.dataframe(pd.DataFrame({"상태": errors}), use_container_width=True, hide_index=True)
     st.stop()
 
 symbol, candidates, resolve_state = resolve_symbol_input(symbol_input)
@@ -942,25 +1112,9 @@ if symbol is None:
         st.dataframe(candidates, use_container_width=True, hide_index=True)
     st.stop()
 
-secret_json = json.dumps(credentials["secret"], ensure_ascii=False)
-token_json = json.dumps(credentials["token"], ensure_ascii=False) if credentials["token"] else None
-
-if "quote_cache" not in st.session_state:
-    st.session_state["quote_cache"] = {}
-
-cache = st.session_state["quote_cache"]
-cached = cache.get(symbol)
-cache_hit = False
-
 try:
-    if cached and "quote" in cached and "base_chart_df" in cached:
-        quote = cached["quote"]
-        base_chart_df = cached["base_chart_df"]
-        cache_hit = True
-    else:
-        with st.spinner("KIS API에 연결 중입니다..."):
-            quote, base_chart_df = fetch_quote_and_chart(secret_json, token_json, symbol, max_attempts=3)
-        cache[symbol] = {"quote": quote, "base_chart_df": base_chart_df, "cached_at": datetime.now()}
+    with st.spinner("KIS API에 연결 중입니다..."):
+        quote, base_chart_df, cache_hit = get_cached_quote_and_chart(cache, secret_json, token_json, symbol)
 except Exception as e:
     st.error(f"조회 중 오류가 발생했습니다: {e}")
     st.stop()
@@ -970,79 +1124,32 @@ chart_df = filter_chart_by_period(base_chart_df, period)
 if cache_hit:
     st.caption("동일 종목 재조회: API 재호출 없이 캐시된 3년 차트로 기간만 재계산했습니다.")
 
-name = get_path_attr(quote, "name", symbol)
-price = get_path_attr(quote, "price")
-change = get_path_attr(quote, "change")
-rate = get_path_attr(quote, "rate")
-volume = get_path_attr(quote, "volume")
-amount = get_path_attr(quote, "amount")
-market_cap = get_path_attr(quote, "market_cap")
-per = get_path_attr(quote, "indicator.per")
-pbr = get_path_attr(quote, "indicator.pbr")
-eps = get_path_attr(quote, "indicator.eps")
-bps = get_path_attr(quote, "indicator.bps")
-market = get_path_attr(quote, "market")
-sector_name = get_path_attr(quote, "sector_name")
-prev_price = get_path_attr(quote, "prev_price")
-open_price = get_path_attr(quote, "open")
-high_price = get_path_attr(quote, "high")
-low_price = get_path_attr(quote, "low")
-high_limit = get_path_attr(quote, "high_limit")
-low_limit = get_path_attr(quote, "low_limit")
-sign_name = get_path_attr(quote, "sign_name")
-currency = get_path_attr(quote, "currency")
-exchange_rate = get_path_attr(quote, "exchange_rate")
-risk = get_path_attr(quote, "risk")
-halt = get_path_attr(quote, "halt")
-overbought = get_path_attr(quote, "overbought")
-unit = get_path_attr(quote, "unit")
-tick = get_path_attr(quote, "tick")
-decimal_places = get_path_attr(quote, "decimal_places")
-w52_high = get_path_attr(quote, "indicator.week52_high")
-w52_low = get_path_attr(quote, "indicator.week52_low")
-w52_high_date = get_path_attr(quote, "indicator.week52_high_date")
-w52_low_date = get_path_attr(quote, "indicator.week52_low_date")
+quote_fields = extract_quote_fields(quote, symbol)
+name = quote_fields["name"]
 st.markdown(f"## {fmt_text(name)} ({symbol})")
-st.caption(f"{fmt_text(sector_name)} | {fmt_text(market)} | {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 기준")
+st.caption(
+    f"{fmt_text(quote_fields['sector_name'])} | {fmt_text(quote_fields['market'])} | {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 기준"
+)
 
 k1, k2, k3, k4 = st.columns(4)
-k1.metric("현재가", f"{fmt_num(price)}원", fmt_delta_compact(change, rate))
-k2.metric("시가총액", fmt_money_kr(market_cap), f"거래대금 {fmt_money_kr(amount)}")
-k3.metric("PER / PBR", f"{fmt_num(per, 2)} / {fmt_num(pbr, 2)}", f"EPS {fmt_num(eps)}")
-k4.metric("52주 범위", f"{fmt_num(w52_low)} ~ {fmt_num(w52_high)}", f"BPS {fmt_num(bps)}")
+k1.metric("현재가", f"{fmt_num(quote_fields['price'])}원", fmt_delta_compact(quote_fields["change"], quote_fields["rate"]))
+k2.metric("시가총액", fmt_money_kr(quote_fields["market_cap"]), f"거래대금 {fmt_money_kr(quote_fields['amount'])}")
+k3.metric(
+    "PER / PBR",
+    f"{fmt_num(quote_fields['per'], 2)} / {fmt_num(quote_fields['pbr'], 2)}",
+    f"EPS {fmt_num(quote_fields['eps'])}",
+)
+k4.metric(
+    "52주 범위",
+    f"{fmt_num(quote_fields['w52_low'])} ~ {fmt_num(quote_fields['w52_high'])}",
+    f"BPS {fmt_num(quote_fields['bps'])}",
+)
 
-range_low = to_float(w52_low)
-range_high = to_float(w52_high)
-current = to_float(price)
-period_low = to_float(chart_df["low"].min()) if not chart_df.empty else None
-period_high = to_float(chart_df["high"].max()) if not chart_df.empty else None
-
-band_title = ""
-band_low: float | None = None
-band_high: float | None = None
-
-if period_low is not None and period_high is not None and period_high > period_low:
-    band_title = f"선택 기간({PERIOD_LABELS.get(period, period)}) 밴드 내 현재 위치 (분할 보정)"
-    band_low = period_low
-    band_high = period_high
-elif range_low is not None and range_high is not None and range_high > range_low:
-    band_title = "52주 밴드 내 현재 위치"
-    band_low = range_low
-    band_high = range_high
-
-band_position = compute_band_position(current, band_low, band_high)
-if band_position is None or current is None or band_low is None or band_high is None:
+band_context = build_band_context(quote_fields, chart_df, period)
+if band_context is None:
     st.info("밴드 계산에 필요한 고가/저가 데이터가 부족합니다.")
 else:
-    render_band_position_card(
-        title=band_title,
-        current=current,
-        low=band_low,
-        high=band_high,
-        position_from_low=band_position["position_from_low"],
-        distance_from_high=band_position["distance_from_high"],
-        marker_percent=band_position["marker_percent"],
-    )
+    render_band_position_card(**band_context)
 
 st_pyecharts(make_kline_chart(chart_df, symbol, name), height="640px")
 
@@ -1053,12 +1160,12 @@ with tab1:
     left.dataframe(
         build_kv_df(
             [
-                ("PER", fmt_num(per, 2)),
-                ("PBR", fmt_num(pbr, 2)),
-                ("EPS", fmt_num(eps)),
-                ("BPS", fmt_num(bps)),
-                ("시가총액", fmt_num(market_cap)),
-                ("통화 / 환율", f"{fmt_text(currency)} / {fmt_num(exchange_rate, 4)}"),
+                ("PER", fmt_num(quote_fields["per"], 2)),
+                ("PBR", fmt_num(quote_fields["pbr"], 2)),
+                ("EPS", fmt_num(quote_fields["eps"])),
+                ("BPS", fmt_num(quote_fields["bps"])),
+                ("시가총액", fmt_num(quote_fields["market_cap"])),
+                ("통화 / 환율", f"{fmt_text(quote_fields['currency'])} / {fmt_num(quote_fields['exchange_rate'], 4)}"),
             ]
         ),
         use_container_width=True,
@@ -1067,12 +1174,12 @@ with tab1:
     right.dataframe(
         build_kv_df(
             [
-                ("52주 고가", f"{fmt_num(w52_high)} ({fmt_text(w52_high_date)[:10]})"),
-                ("52주 저가", f"{fmt_num(w52_low)} ({fmt_text(w52_low_date)[:10]})"),
-                ("전일종가", fmt_num(prev_price)),
-                ("상한가 / 하한가", f"{fmt_num(high_limit)} / {fmt_num(low_limit)}"),
-                ("업종", fmt_text(sector_name)),
-                ("시장", fmt_text(market)),
+                ("52주 고가", f"{fmt_num(quote_fields['w52_high'])} ({fmt_text(quote_fields['w52_high_date'])[:10]})"),
+                ("52주 저가", f"{fmt_num(quote_fields['w52_low'])} ({fmt_text(quote_fields['w52_low_date'])[:10]})"),
+                ("전일종가", fmt_num(quote_fields["prev_price"])),
+                ("상한가 / 하한가", f"{fmt_num(quote_fields['high_limit'])} / {fmt_num(quote_fields['low_limit'])}"),
+                ("업종", fmt_text(quote_fields["sector_name"])),
+                ("시장", fmt_text(quote_fields["market"])),
             ]
         ),
         use_container_width=True,
@@ -1083,12 +1190,15 @@ with tab2:
     st.dataframe(
         build_kv_df(
             [
-                ("현재가", fmt_num(price)),
-                ("전일대비", f"{fmt_num(change)} ({fmt_num(rate, 2)}%)"),
-                ("대비부호", fmt_text(sign_name)),
-                ("시가 / 고가 / 저가", f"{fmt_num(open_price)} / {fmt_num(high_price)} / {fmt_num(low_price)}"),
-                ("거래량", fmt_num(volume)),
-                ("거래대금", fmt_num(amount)),
+                ("현재가", fmt_num(quote_fields["price"])),
+                ("전일대비", f"{fmt_num(quote_fields['change'])} ({fmt_num(quote_fields['rate'], 2)}%)"),
+                ("대비부호", fmt_text(quote_fields["sign_name"])),
+                (
+                    "시가 / 고가 / 저가",
+                    f"{fmt_num(quote_fields['open_price'])} / {fmt_num(quote_fields['high_price'])} / {fmt_num(quote_fields['low_price'])}",
+                ),
+                ("거래량", fmt_num(quote_fields["volume"])),
+                ("거래대금", fmt_num(quote_fields["amount"])),
             ]
         ),
         use_container_width=True,
@@ -1099,12 +1209,12 @@ with tab3:
     st.dataframe(
         build_kv_df(
             [
-                ("위험도", fmt_text(risk)),
-                ("거래정지", fmt_text(halt)),
-                ("단기과열구분", fmt_text(overbought)),
-                ("거래단위", fmt_text(unit)),
-                ("호가단위", fmt_text(tick)),
-                ("소수점자리수", fmt_text(decimal_places)),
+                ("위험도", fmt_text(quote_fields["risk"])),
+                ("거래정지", fmt_text(quote_fields["halt"])),
+                ("단기과열구분", fmt_text(quote_fields["overbought"])),
+                ("거래단위", fmt_text(quote_fields["unit"])),
+                ("호가단위", fmt_text(quote_fields["tick"])),
+                ("소수점자리수", fmt_text(quote_fields["decimal_places"])),
             ]
         ),
         use_container_width=True,
