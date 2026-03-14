@@ -234,6 +234,48 @@ def render_band_position_card(
     )
 
 
+def render_portfolio_band_card(
+    name: str,
+    symbol: str,
+    current: Any,
+    change: Any,
+    rate: Any,
+    low: float,
+    high: float,
+    marker_percent: float,
+) -> None:
+    st.markdown(
+        f"""
+<div class="card" style="padding:.8rem .9rem; margin-top:.25rem;">
+  <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:.75rem;">
+    <div>
+      <div style="font-size:1rem;color:#0f172a;font-weight:700;line-height:1.2;">{fmt_text(name)}</div>
+      <div style="font-size:.72rem;color:#64748b;margin-top:.05rem;">{symbol}</div>
+    </div>
+    <div style="text-align:right;">
+      <div style="font-size:.96rem;color:#0f172a;font-weight:700;">{fmt_num(current)}원</div>
+      <div style="font-size:.76rem;color:#64748b;">{fmt_delta_compact(change, rate)}</div>
+    </div>
+  </div>
+  <div style="font-size:.8rem;color:#334155;font-weight:600;margin-top:.55rem;">
+    현재 위치 {marker_percent:.1f}%
+  </div>
+  <div style="margin-top:.35rem;">
+    <div style="position:relative;height:12px;border-radius:999px;background:#e2e8f0;">
+      <div style="position:absolute;left:0;top:0;height:100%;width:{marker_percent:.2f}%;background:#60a5fa;border-radius:999px;"></div>
+      <div style="position:absolute;left:{marker_percent:.2f}%;top:-5px;transform:translateX(-50%);width:2px;height:22px;background:#0f172a;"></div>
+    </div>
+  </div>
+  <div style="display:flex;justify-content:space-between;font-size:.72rem;color:#64748b;margin-top:.28rem;gap:.5rem;">
+    <span>저가 {fmt_num(low)}</span>
+    <span>고가 {fmt_num(high)}</span>
+  </div>
+</div>
+""",
+        unsafe_allow_html=True,
+    )
+
+
 def load_portfolio_symbols(file_path: Path = PORTFOLIO_SYMBOLS_FILE) -> list[str]:
     if not file_path.exists():
         return []
@@ -1051,7 +1093,9 @@ if portfolio_submitted:
         st.stop()
 
     st.markdown(f"## 포트폴리오 밴드 위치 ({PERIOD_LABELS.get(period, period)})")
-    st.caption(f"종목 목록 파일: {PORTFOLIO_SYMBOLS_FILE.name}")
+    st.caption(
+        f"공통 기준: 선택 기간({PERIOD_LABELS.get(period, period)}) 밴드 내 현재 위치 (분할 보정) · 종목 목록 파일: {PORTFOLIO_SYMBOLS_FILE.name}"
+    )
 
     progress = st.progress(0.0, text="포트폴리오 종목 확인 중...")
     cards_rendered = 0
@@ -1085,11 +1129,16 @@ if portfolio_submitted:
             continue
 
         with cols[cards_rendered % len(cols)]:
-            st.markdown(f"### {fmt_text(quote_fields['name'])} ({symbol})")
-            st.caption(
-                f"{fmt_text(quote_fields['sector_name'])} | {fmt_text(quote_fields['market'])} | 현재가 {fmt_num(quote_fields['price'])}원"
+            render_portfolio_band_card(
+                name=quote_fields["name"],
+                symbol=symbol,
+                current=quote_fields["price"],
+                change=quote_fields["change"],
+                rate=quote_fields["rate"],
+                low=band_context["low"],
+                high=band_context["high"],
+                marker_percent=band_context["marker_percent"],
             )
-            render_band_position_card(**band_context)
         cards_rendered += 1
 
     progress.empty()
