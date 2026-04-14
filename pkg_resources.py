@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from importlib import metadata
+from importlib.resources import files
 
 
 class DistributionNotFound(Exception):
@@ -25,3 +26,7 @@ def parse_version(version: str) -> tuple[int | str, ...]:
     for part in version.replace("-", ".").split("."):
         parts.append(int(part) if part.isdigit() else part)
     return tuple(parts)
+
+
+def resource_filename(package: str, resource_name: str) -> str:
+    return str(files(package).joinpath(resource_name))
